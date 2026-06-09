@@ -20,6 +20,13 @@ This document explains the core concepts and technologies implemented in Phase 1
 12. [Testing with Jest and React Testing Library](#testing-with-jest-and-react-testing-library)
 13. [Tailwind CSS v4](#tailwind-css-v4)
 14. [Key Patterns and Best Practices](#key-patterns-and-best-practices)
+15. [Docker Fundamentals](#docker-fundamentals)
+16. [Multi-Stage Docker Builds](#multi-stage-docker-builds)
+17. [.dockerignore](#dockerignore)
+18. [Docker Compose](#docker-compose)
+19. [Health Checks and Dependencies](#health-checks-and-dependencies)
+20. [Docker Environment Variables](#docker-environment-variables)
+21. [Docker Best Practices](#docker-best-practices)
 
 ---
 
@@ -1128,6 +1135,651 @@ This will prepare your application for deployment and scaling.
 
 ---
 
+## Docker Fundamentals
+
+### What is Docker?
+
+Docker is a platform for developing, shipping, and running applications in containers. Containers are lightweight, standalone packages that include everything needed to run an application: code, runtime, system tools, libraries, and settings.
+
+### Key Concepts
+
+**1. Docker Images**: Read-only templates used to create containers. Images contain your application code, dependencies, and configuration.
+
+```dockerfile
+# Your Dockerfile defines how to build an image
+FROM node:22-slim
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+CMD ["npm", "start"]
+```
+
+**2. Docker Containers**: Running instances of Docker images. You can start, stop, and manage containers.
+
+```bash
+# Build an image
+docker build -t task-manager-app .
+
+# Run a container
+docker run -p 3000:3000 task-manager-app
+
+# List running containers
+docker ps
+```
+
+**3. Volumes**: Persistent storage that survives container restarts. Used for databases and stateful data.
+
+**4. Networks**: Isolated communication channels between containers. Services on the same network can communicate by service name.
+
+**5. Docker Daemon**: The background service that manages containers, images, volumes, and networks.
+
+### Why Use Docker?
+
+- **Consistency**: Runs the same way everywhere (dev, staging, production)
+- **Isolation**: Dependencies are packaged, no conflicts with host system
+- **Reproducibility**: Same image produces same behavior every time
+- **Scalability**: Easy to scale horizontally with orchestrators
+- **Portability**: Run on any platform with Docker installed
+
+---
+
+## Multi-Stage Docker Builds
+
+### What Are Multi-Stage Builds?
+
+Multi-stage builds use multiple `FROM` statements in a single Dockerfile. Each stage creates an intermediate image, and you can copy artifacts from previous stages. This reduces the final image size by excluding build tools and dependencies.
+
+### Your Project's Multi-Stage Dockerfile
+
+```dockerfile
+# task-manager/Dockerfile:1-46
+
+ARG NODE_VERSION=22-slim
+
+# Stage 1: Dependencies
+FROM node:${NODE_VERSION} AS dependencies
+
+WORKDIR /app
+
+COPY package.json package-lock.json* ./
+
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --no-audit --no-fund
+
+# Stage 2: Builder
+FROM node:${NODE_VERSION} AS builder
+
+WORKDIR /app
+
+COPY --from=dependencies /app/node_modules ./node_modules
+
+COPY . .
+
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+
+RUN npx prisma generate && npm run build
+
+# Stage 3: Runner (minimal production image)
+FROM node:${NODE_VERSION} AS runner
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV PORT=3000
+ENV HOSTNAME="0.0.0.0"
+
+RUN addgroup --system --gid 1001 nodejs && \
+    adduser --system --uid 1001 nextjs
+
+COPY --from=builder /app/public ./public
+
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+
+USER nextjs
+
+EXPOSE 3000
+
+CMD ["node", "server.js"]
+```
+
+### Breakdown of Each Stage
+
+**Stage 1: Dependencies**
+- Caches npm packages separately from source code
+- Uses BuildKit cache mounts to speed up rebuilds
+- `npm ci` installs exact versions from package-lock.json
+
+**Stage 2: Builder**
+- Copies dependencies and source code
+- Generates Prisma client
+- Builds Next.js with standalone output
+- Produces `.next/standalone/` directory
+
+**Stage 3: Runner**
+- Non-root user for security (`nextjs:nodejs`)
+- Only copies what's needed to run:
+  - `public/` folder (static assets)
+  - `.next/standalone/` (minimal Next.js server)
+  - `.next/static/` (optimized static files)
+- **No source code, no dev dependencies, no build tools**
+
+### Why This Matters
+
+| Without Multi-Stage | With Multi-Stage |
+|---------------------|------------------|
+| ~1GB+ image | ~200MB image |
+| Includes dev dependencies | Only runtime dependencies |
+| Security risk (more attack surface) | Minimal attack surface |
+| Slower pulls | Faster pulls |
+
+---
+
+## .dockerignore
+
+### What is .dockerignore?
+
+Similar to `.gitignore`, `.dockerignore` specifies files and directories that should NOT be copied into the Docker build context. This reduces build time and image size.
+
+### Your Project's .dockerignore
+
+```dockerfile
+# task-manager/.dockerignore:1-9
+
+node_modules
+.next
+.git
+.gitignore
+.env
+.env.*
+coverage
+src/generated
+*.md
+Dockerfile
+docker-compose*.yml
+.dockerignore
+```
+
+### What's Excluded and Why
+
+| Excluded | Reason |
+|----------|--------|
+| `node_modules` | Rebuilt inside container with correct OS binaries |
+| `.next` | Rebuilt during Docker build process |
+| `.git` | Repository metadata not needed in production |
+| `.env*` | Secrets should be passed via docker-compose environment |
+| `coverage` | Test coverage reports not needed in production |
+| `src/generated` | Prisma client regenerated during build |
+| `*.md` | Documentation not needed in container |
+| `Dockerfile`, `docker-compose*.yml` | Docker configs not needed inside container |
+| `.dockerignore` | This file itself |
+
+### Impact on Build Context
+
+**Without .dockerignore:**
+```
+Sending build context to Docker daemon  245.3MB
+```
+
+**With .dockerignore:**
+```
+Sending build context to Docker daemon   2.4MB
+```
+
+Huge difference in build speed, especially with `node_modules`.
+
+---
+
+## Docker Compose
+
+### What is Docker Compose?
+
+Docker Compose is a tool for defining and running multi-container Docker applications. It uses YAML files to configure application services.
+
+### Your Project's docker-compose.yml
+
+```yaml
+# task-manager/docker-compose.yml:1-37
+
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: task-manager-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: taskmanager
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: task-manager-app
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/taskmanager
+      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_SECRET: local-dev-secret-change-in-production
+      AUTH_TRUST_HOST: "true"
+    ports:
+      - "3000:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+```
+
+### Service Configuration Breakdown
+
+**db Service (PostgreSQL):**
+- `image: postgres:17-alpine` - Official PostgreSQL image, Alpine variant for minimal size
+- `container_name` - Fixed container name for easy reference
+- `restart: unless-stopped` - Auto-restart on failure
+- `ports: "5432:5432"` - Maps host port 5432 to container port 5432
+- `volumes: pgdata:/var/lib/postgresql/data` - Persists data in named volume
+- `healthcheck` - PostgreSQL ready check before app starts
+
+**app Service (Next.js):**
+- `build: { context: ., dockerfile: Dockerfile }` - Build image from current directory
+- `environment` - App configuration variables
+- `DATABASE_URL` uses `db` as hostname (Docker network resolution)
+- `AUTH_TRUST_HOST=true` - Required for NextAuth v5 in production mode
+- `depends_on` - Waits for db health check before starting
+
+### Docker Compose Commands
+
+```bash
+# Build and start all services
+docker compose up -d --build
+
+# Stop all services
+docker compose down
+
+# Stop and remove volumes (deletes database)
+docker compose down -v
+
+# View service status
+docker compose ps
+
+# View logs
+docker compose logs -f app
+docker compose logs -f db
+
+# Execute command in container
+docker compose exec app ls -la
+docker compose exec db psql -U postgres -d taskmanager
+
+# Restart a service
+docker compose restart app
+
+# Rebuild a specific service
+docker compose up -d --build app
+```
+
+### Pushing Database Schema
+
+Since the runner image doesn't include Prisma CLI, run schema pushes from the host:
+
+```bash
+# Start containers first
+docker compose up -d --build
+
+# Push schema from host (port 5432 mapped to localhost)
+set DATABASE_URL=postgresql://postgres:postgres@localhost:5432/taskmanager
+npx prisma db push
+```
+
+---
+
+## Health Checks and Dependencies
+
+### What Are Health Checks?
+
+Health checks verify that a service is ready to accept requests. Docker Compose uses health checks to manage service startup order.
+
+### Your PostgreSQL Health Check
+
+```yaml
+# task-manager/docker-compose.yml:14-18
+
+healthcheck:
+  test: ["CMD-SHELL", "pg_isready -U postgres"]
+  interval: 10s
+  timeout: 5s
+  retries: 5
+```
+
+**Parameters:**
+- `test` - Command to check health
+- `interval` - Run check every 10 seconds
+- `timeout` - Wait 5 seconds for response
+- `retries` - Fail after 5 consecutive failures
+
+### Depends_on with Health Condition
+
+```yaml
+# task-manager/docker-compose.yml:32-34
+
+depends_on:
+  db:
+    condition: service_healthy
+```
+
+This ensures the app waits for PostgreSQL to be healthy before starting. Without this, the app might crash trying to connect to a database that's still initializing.
+
+### Viewing Health Status
+
+```bash
+# Check service health
+docker compose ps
+
+# Output example:
+NAME                  STATUS                    PORTS
+task-manager-app      Up 5 minutes (healthy)    0.0.0.0:3000->3000/tcp
+task-manager-db       Up 5 minutes (healthy)    0.0.0.0:5432->5432/tcp
+```
+
+---
+
+## Docker Environment Variables
+
+### Why Environment Variables?
+
+Environment variables allow you to configure applications without changing code. Different environments (dev, staging, production) can have different configurations.
+
+### Environment Variables in docker-compose.yml
+
+```yaml
+# task-manager/docker-compose.yml:26-30
+
+environment:
+  DATABASE_URL: postgresql://postgres:postgres@db:5432/taskmanager
+  NEXTAUTH_URL: http://localhost:3000
+  NEXTAUTH_SECRET: local-dev-secret-change-in-production
+  AUTH_TRUST_HOST: "true"
+```
+
+### How They Work
+
+1. **Container Runtime**: Variables are injected into the container's environment
+2. **Application Access**: Node.js reads via `process.env.VARIABLE_NAME`
+3. **Build vs Runtime**: Some variables needed at build time, others at runtime
+
+### Security Best Practices
+
+**❌ Bad (secrets in docker-compose.yml):**
+```yaml
+environment:
+  DATABASE_PASSWORD: super-secret-password  # Committed to Git!
+```
+
+**✅ Good (use .env file or secrets management):**
+```yaml
+env_file:
+  - .env.docker
+
+# Or use Docker Secrets in production
+secrets:
+  - db_password
+```
+
+For this learning project, using environment variables directly is acceptable. In production, use secrets management.
+
+---
+
+## Docker Best Practices
+
+### 1. Use Minimal Base Images
+
+**❌ Avoid:**
+```dockerfile
+FROM node:22  # ~1GB
+```
+
+**✅ Prefer:**
+```dockerfile
+FROM node:22-slim  # ~200MB
+```
+
+### 2. Leverage BuildKit Caches
+
+```dockerfile
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --no-audit --no-fund
+```
+
+Cache mounts speed up rebuilds by reusing downloaded packages.
+
+### 3. Run as Non-Root User
+
+```dockerfile
+RUN addgroup --system --gid 1001 nodejs && \
+    adduser --system --uid 1001 nextjs
+
+USER nextjs
+```
+
+Reduces security risk if container is compromised.
+
+### 4. Use .dockerignore
+
+Exclude unnecessary files to reduce build context size and build time.
+
+### 5. Enable Health Checks
+
+Ensure dependencies are ready before starting dependent services.
+
+### 6. Use Named Volumes for Persistence
+
+```yaml
+volumes:
+  pgdata:  # Named volume survives container restart
+```
+
+### 7. Don't Run Prisma CLI in Runner Image
+
+The runner image is minimal and doesn't include build tools. Run schema migrations from the host machine.
+
+### 8. Set Resource Limits (for production)
+
+```yaml
+deploy:
+  resources:
+    limits:
+      cpus: '0.5'
+      memory: 512M
+    reservations:
+      cpus: '0.25'
+      memory: 256M
+```
+
+### 9. Tag Images Properly
+
+```bash
+# Bad
+docker build -t app .
+
+# Good
+docker build -t task-manager-app:1.0.0 .
+docker build -t task-manager-app:latest .
+docker build -t username/task-manager-app:1.0.0 .
+```
+
+### 10. Use Multi-Stage Builds
+
+Separate build dependencies from runtime dependencies to minimize image size.
+
+---
+
+## Common Issues and Solutions
+
+### Issue 1: UntrustedHost Error with NextAuth
+
+**Error:**
+```
+[auth][error] UntrustedHost: Host must be trusted
+```
+
+**Cause:** NextAuth v5 requires explicit trust in production mode.
+
+**Solution:**
+```yaml
+environment:
+  AUTH_TRUST_HOST: "true"
+```
+
+### Issue 2: Database Connection Failures
+
+**Error:**
+```
+Can't reach database server at `db:5432`
+```
+
+**Cause:** App starting before database is ready.
+
+**Solution:** Use health checks in depends_on:
+```yaml
+depends_on:
+  db:
+    condition: service_healthy
+```
+
+### Issue 3: Slow Build Times
+
+**Cause:** Reinstalling dependencies on every build.
+
+**Solution:** Use BuildKit cache mounts:
+```dockerfile
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --no-audit --no-fund
+```
+
+### Issue 4: Large Image Size
+
+**Cause:** Including unnecessary files in image.
+
+**Solutions:**
+- Use `.dockerignore`
+- Use multi-stage builds
+- Use minimal base images (alpine/slim)
+
+### Issue 5: Port Already in Use
+
+**Error:**
+```
+Error starting userland proxy: listen tcp 0.0.0.0:3000: bind: address already in use
+```
+
+**Cause:** Another process using port 3000.
+
+**Solution:**
+```bash
+# Find and stop the process
+netstat -ano | findstr :3000
+taskkill /PID <PID> /F
+
+# Or use a different port
+ports:
+  - "3001:3000"
+```
+
+### Issue 6: Permission Denied for Volumes (Linux)
+
+**Error:**
+```
+Permission denied: './public'
+```
+
+**Cause:** Volume created with wrong ownership.
+
+**Solution:**
+```dockerfile
+RUN chown -R nextjs:nodejs /app
+```
+
+---
+
+## What You've Learned in Phase 2
+
+### Technologies Mastered:
+- ✅ Docker fundamentals and concepts
+- ✅ Multi-stage Docker builds
+- ✅ Dockerfile optimization techniques
+- ✅ Docker Compose orchestration
+- ✅ Health checks and service dependencies
+- ✅ Docker volumes and persistence
+- ✅ Docker networks and communication
+- ✅ Environment variable management
+- ✅ BuildKit cache optimization
+
+### Core Concepts:
+- ✅ Container isolation and portability
+- ✅ Image layering and caching
+- ✅ Build context optimization with .dockerignore
+- ✅ Service orchestration with Docker Compose
+- ✅ Startup order management
+- ✅ Persistent data management
+- ✅ Security best practices (non-root users, minimal images)
+- ✅ Production-ready container patterns
+
+### Best Practices:
+- ✅ Multi-stage builds for minimal images
+- ✅ Health checks for reliable service startup
+- ✅ Non-root user for security
+- ✅ Named volumes for data persistence
+- ✅ BuildKit caches for faster builds
+- ✅ Proper environment variable configuration
+- ✅ Tagging and versioning images
+- ✅ Debugging and troubleshooting containers
+
+---
+
+## Next Steps: Phase 3
+
+In Phase 3, you'll learn:
+- GitHub Actions workflows and CI/CD pipelines
+- Automated testing in CI
+- Docker image building and pushing to registries
+- Security scanning integration
+- Deployment automation
+- GitOps principles
+
+This will automate your build, test, and deployment processes.
+
+---
+
+## Resources for Further Learning
+
+### Docker
+- [Docker Documentation](https://docs.docker.com/)
+- [Dockerfile Best Practices](https://docs.docker.com/develop/develop-images/dockerfile_best-practices/)
+- [Docker Compose Documentation](https://docs.docker.com/compose/)
+- [Docker Multi-Stage Builds](https://docs.docker.com/build/building/multi-stage/)
+
+### Next.js + Docker
+- [Next.js Deployment: Docker](https://nextjs.org/docs/app/building-your-application/deploying#docker-image)
+- [Next.js Standalone Output](https://nextjs.org/docs/app/building-your-application/configuring/output#automatically-copying-traced-files)
+
+### DevOps
+- [Dockerfile Reference](https://docs.docker.com/engine/reference/builder/)
+- [Docker Compose File Reference](https://docs.docker.com/compose/compose-file/)
+- [BuildKit Documentation](https://github.com/moby/buildkit)
+
 ## Resources for Further Learning
 
 ### React & Next.js
@@ -1146,6 +1798,13 @@ This will prepare your application for deployment and scaling.
 ### Prisma
 - [Prisma Documentation](https://www.prisma.io/docs)
 - [Prisma Schema Reference](https://www.prisma.io/docs/reference/api-reference/prisma-schema-reference)
+
+### Docker & DevOps
+- [Docker Documentation](https://docs.docker.com/)
+- [Docker Compose Documentation](https://docs.docker.com/compose/)
+- [Next.js Deployment: Docker](https://nextjs.org/docs/app/building-your-application/deploying#docker-image)
+- [Docker Multi-Stage Builds](https://docs.docker.com/build/building/multi-stage/)
+- [Dockerfile Best Practices](https://docs.docker.com/develop/develop-images/dockerfile_best-practices/)
 
 ---
 
