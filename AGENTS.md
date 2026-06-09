@@ -55,6 +55,30 @@ Uses Tailwind v4 with new `@import "tailwindcss"` syntax in `globals.css`. Do NO
 - Mock async handlers with `.mockResolvedValue(undefined)`
 - Tests in `src/components/__tests__/` follow component name pattern
 
+## Docker (Phase 2)
+
+- Next.js standalone output enabled (`output: "standalone"` in next.config.ts)
+- Multi-stage Dockerfile: deps → build → minimal runner
+- Docker Compose: app + PostgreSQL 17 Alpine
+- Runner image does NOT contain Prisma CLI — run schema pushes from host:
+  ```bash
+  # Start containers
+  docker compose up -d --build
+  # Push schema from host (port 5432 mapped to localhost)
+  set DATABASE_URL=postgresql://postgres:postgres@localhost:5432/taskmanager
+  npx prisma db push
+  ```
+- Docker PostgreSQL is separate from Supabase — register new users inside the containerized app
+- `AUTH_TRUST_HOST=true` required in Docker environment (NextAuth v5 security)
+- Common commands:
+  ```bash
+  docker compose up -d --build   # Build and start
+  docker compose ps              # Check status
+  docker compose logs -f app     # View app logs
+  docker compose down            # Stop containers
+  docker compose down -v         # Stop and delete DB volume
+  ```
+
 ## Authentication
 
 - NextAuth v5 beta with Credentials provider + bcryptjs
