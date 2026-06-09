@@ -27,6 +27,7 @@ services:
       DATABASE_URL: postgresql://postgres:postgres@db:5432/taskmanager
       NEXTAUTH_URL: http://localhost:3000
       NEXTAUTH_SECRET: local-dev-secret-change-in-production
+      AUTH_TRUST_HOST: "true"
     ports:
       - "3000:3000"
     depends_on:
