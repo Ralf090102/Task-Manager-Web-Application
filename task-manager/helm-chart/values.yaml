@@ -1,0 +1,33 @@
+replicaCount: 1
+
+image:
+  repository: ralf090102/task-manager-app
+  pullPolicy: IfNotPresent
+  tag: latest
+
+service:
+  type: ClusterIP
+  port: 3000
+
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: task-manager.local
+      paths:
+        - path: /
+          pathType: Prefix
+
+secrets:
+  databaseUrl: ""
+  nextauthSecret: ""
+  nextauthUrl: "http://task-manager.local"
+  authTrustHost: "true"
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 250m
+    memory: 256Mi
