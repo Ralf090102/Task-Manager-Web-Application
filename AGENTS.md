@@ -79,6 +79,17 @@ Uses Tailwind v4 with new `@import "tailwindcss"` syntax in `globals.css`. Do NO
   docker compose down -v         # Stop and delete DB volume
   ```
 
+## CI/CD (Phase 3)
+
+- GitHub Actions workflow: `.github/workflows/ci.yml` (at repo root)
+- Working directory for all steps: `task-manager/`
+- Three jobs: `quality` → `security` → `docker`
+- **quality**: lint, type-check, test (runs on every push and PR to main)
+- **security**: npm audit + Trivy filesystem scan (runs in parallel with quality)
+- **docker**: build + push to Docker Hub (only on main push, after quality + security pass)
+- Docker build context: `./task-manager`
+- Required GitHub secrets: `DOCKER_USERNAME`, `DOCKER_PASSWORD`
+
 ## Authentication
 
 - NextAuth v5 beta with Credentials provider + bcryptjs

@@ -27,6 +27,13 @@ This document explains the core concepts and technologies implemented in Phase 1
 19. [Health Checks and Dependencies](#health-checks-and-dependencies)
 20. [Docker Environment Variables](#docker-environment-variables)
 21. [Docker Best Practices](#docker-best-practices)
+22. [GitHub Actions Fundamentals](#github-actions-fundamentals)
+23. [Your CI Pipeline](#your-ci-pipeline)
+24. [Quality Gates Job](#quality-gates-job)
+25. [Security Scanning Job](#security-scanning-job)
+26. [Docker Build & Push Job](#docker-build--push-job)
+27. [GitHub Secrets Configuration](#github-secrets-configuration)
+28. [CI/CD Best Practices](#cicd-best-practices)
 
 ---
 
@@ -1763,6 +1770,627 @@ This will automate your build, test, and deployment processes.
 
 ---
 
+## GitHub Actions Fundamentals
+
+### What is GitHub Actions?
+
+GitHub Actions is a CI/CD platform built into GitHub. It automates workflows (build, test, deploy) directly from your repository. Workflows are defined in YAML files and triggered by events like pushes, pull requests, or schedules.
+
+### Key Concepts
+
+**1. Workflows**: Automated processes defined in `.github/workflows/`. A repository can have multiple workflows.
+
+```yaml
+# .github/workflows/ci.yml
+name: CI Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+```
+
+**2. Events**: Triggers that start workflows. Common events:
+- `push` - Code pushed to a branch
+- `pull_request` - PR opened, updated, or merged
+- `schedule` - Cron-based scheduling
+- `workflow_dispatch` - Manual trigger
+
+**3. Jobs**: Groups of steps that execute on the same runner. Jobs can run in parallel or sequentially with dependencies.
+
+```yaml
+jobs:
+  quality:        # Job 1
+    runs-on: ubuntu-latest
+    steps: [...]
+
+  security:       # Job 2 (runs in parallel with quality)
+    runs-on: ubuntu-latest
+    steps: [...]
+
+  docker:         # Job 3 (waits for quality + security)
+    needs: [quality, security]
+    runs-on: ubuntu-latest
+    steps: [...]
+```
+
+**4. Steps**: Individual tasks within a job. Each step runs in order on the same runner.
+
+**5. Runners**: Servers that execute workflows. GitHub provides `ubuntu-latest`, `windows-latest`, `macos-latest`.
+
+### Why CI/CD Matters
+
+- **Catch bugs early**: Every push is tested automatically
+- **Consistency**: Same build process every time
+- **Confidence**: Code passes quality gates before merging
+- **Automation**: No manual build/deploy steps
+
+---
+
+## Your CI Pipeline
+
+### Pipeline Structure
+
+Your pipeline has three jobs with a clear dependency chain:
+
+```
+push/PR to main
+       │
+       ├── quality (lint, type-check, test)
+       │
+       ├── security (npm audit, Trivy scan)
+       │
+       └── docker (build & push image)
+              │
+              └── only if quality + security pass
+              └── only on main push (not PRs)
+```
+
+### Complete Workflow File
+
+```yaml
+# .github/workflows/ci.yml
+
+name: CI Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+defaults:
+  run:
+    working-directory: task-manager
+
+jobs:
+  quality:
+    name: Quality Gates
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: task-manager/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type check
+        run: npm run type-check
+
+      - name: Run tests
+        run: npm test
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: task-manager
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: task-manager/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: npm audit
+        run: npm audit --audit-level=high
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: ./task-manager
+          severity: HIGH,CRITICAL
+
+  docker:
+    name: Build & Push Docker Image
+    runs-on: ubuntu-latest
+    needs: [quality, security]
+    if: github.event_name == 'push'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKER_USERNAME }}/task-manager-app
+          tags: |
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: ./task-manager
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+```
+
+---
+
+## Quality Gates Job
+
+### What Are Quality Gates?
+
+Quality gates are automated checks that code must pass before it can be merged or deployed. They catch bugs, style issues, and type errors early.
+
+### Step-by-Step Breakdown
+
+**Checkout Code:**
+```yaml
+- name: Checkout code
+  uses: actions/checkout@v4
+```
+Clones your repository onto the runner. Every workflow starts here.
+
+**Setup Node.js with Caching:**
+```yaml
+- name: Setup Node.js
+  uses: actions/setup-node@v4
+  with:
+    node-version: 22
+    cache: npm
+    cache-dependency-path: task-manager/package-lock.json
+```
+- Installs Node.js 22 on the runner
+- `cache: npm` caches downloaded packages between runs (faster builds)
+- `cache-dependency-path` tells the cache where to find the lock file
+
+**Install Dependencies:**
+```yaml
+- name: Install dependencies
+  run: npm ci
+```
+`npm ci` installs exact versions from package-lock.json. Cleaner than `npm install` for CI.
+
+**Generate Prisma Client:**
+```yaml
+- name: Generate Prisma client
+  run: npx prisma generate
+```
+Required before type-check and build. Generates the Prisma client to `src/generated/prisma/`.
+
+**Lint, Type Check, Test:**
+```yaml
+- name: Lint
+  run: npm run lint
+
+- name: Type check
+  run: npm run type-check
+
+- name: Run tests
+  run: npm test
+```
+Each step runs in sequence. If any fails, the job stops and reports failure.
+
+### Why This Order?
+
+1. `npm ci` — must install before anything
+2. `prisma generate` — must generate before type-check
+3. `lint` — fastest check, catches style issues first
+4. `type-check` — medium speed, catches type errors
+5. `test` — slowest, catches logic errors
+
+Fastest checks first means you get feedback quickly on failures.
+
+---
+
+## Security Scanning Job
+
+### What is Security Scanning?
+
+Security scanning identifies known vulnerabilities in dependencies and code. It runs in parallel with quality gates for faster feedback.
+
+### npm audit
+
+```yaml
+- name: npm audit
+  run: npm audit --audit-level=high
+```
+
+- Scans `package-lock.json` for known vulnerabilities
+- `--audit-level=high` only fails on HIGH or CRITICAL vulnerabilities
+- Low/moderate vulnerabilities are reported but don't block the pipeline
+
+### Trivy Vulnerability Scanner
+
+```yaml
+- name: Run Trivy vulnerability scanner
+  uses: aquasecurity/trivy-action@master
+  with:
+    scan-type: fs
+    scan-ref: ./task-manager
+    severity: HIGH,CRITICAL
+```
+
+- Trivy scans the filesystem for vulnerabilities
+- `scan-type: fs` — scans files, not container images
+- `scan-ref: ./task-manager` — directory to scan
+- `severity: HIGH,CRITICAL` — only reports severe issues
+
+### Why Two Scanners?
+
+| Scanner | What it checks |
+|---------|---------------|
+| `npm audit` | npm package vulnerabilities |
+| Trivy | Broader: dependencies, config files, licenses |
+
+---
+
+## Docker Build & Push Job
+
+### What This Job Does
+
+After quality and security pass, this job builds the Docker image and pushes it to Docker Hub. This makes the image available for deployment.
+
+### Dependency Management
+
+```yaml
+needs: [quality, security]
+if: github.event_name == 'push'
+```
+
+- `needs: [quality, security]` — waits for both jobs to pass
+- `if: github.event_name == 'push'` — only runs on direct pushes (not PRs)
+
+### Docker Buildx Setup
+
+```yaml
+- name: Set up Docker Buildx
+  uses: docker/setup-buildx-action@v3
+```
+
+Buildx enables advanced Docker build features:
+- BuildKit caching (faster rebuilds)
+- Multi-platform builds (amd64, arm64)
+- GitHub Actions cache backend
+
+### Docker Hub Authentication
+
+```yaml
+- name: Log in to Docker Hub
+  uses: docker/login-action@v3
+  with:
+    username: ${{ secrets.DOCKER_USERNAME }}
+    password: ${{ secrets.DOCKER_PASSWORD }}
+```
+
+Uses GitHub Secrets (never hardcoded in the workflow):
+- `DOCKER_USERNAME` — your Docker Hub username
+- `DOCKER_PASSWORD` — a Docker Hub access token (not your password)
+
+### Image Tagging Strategy
+
+```yaml
+- name: Extract metadata
+  id: meta
+  uses: docker/metadata-action@v5
+  with:
+    images: ${{ secrets.DOCKER_USERNAME }}/task-manager-app
+    tags: |
+      type=sha
+      type=raw,value=latest,enable={{is_default_branch}}
+```
+
+Each build gets two tags:
+- `sha-<commit-hash>` — unique tag for every build (e.g., `sha-a1b2c3d`)
+- `latest` — always points to the most recent main build
+
+### Build with Caching
+
+```yaml
+- name: Build and push
+  uses: docker/build-push-action@v5
+  with:
+    context: ./task-manager
+    push: true
+    tags: ${{ steps.meta.outputs.tags }}
+    cache-from: type=gha
+    cache-to: type=gha,mode=max
+```
+
+- `context: ./task-manager` — Docker build context points to the app directory
+- `push: true` — pushes image to Docker Hub
+- `cache-from: type=gha` — uses GitHub Actions cache for Docker layers
+- `cache-to: type=gha,mode=max` — caches all layers for maximum cache hits
+
+---
+
+## GitHub Secrets Configuration
+
+### Setting Up Secrets
+
+GitHub Secrets store sensitive data that workflows need. They're encrypted and never exposed in logs.
+
+**Steps:**
+1. Go to your repository on GitHub
+2. Navigate to **Settings > Secrets and variables > Actions**
+3. Click **New repository secret**
+4. Add each secret
+
+### Required Secrets
+
+| Secret | Description | How to get |
+|--------|-------------|------------|
+| `DOCKER_USERNAME` | Your Docker Hub username | Your Docker Hub account |
+| `DOCKER_PASSWORD` | Docker Hub access token | Docker Hub > Account Settings > Security > New Access Token |
+
+### Creating a Docker Hub Access Token
+
+```bash
+# 1. Go to https://hub.docker.com/settings/security
+# 2. Click "New Access Token"
+# 3. Give it a description (e.g., "GitHub Actions")
+# 4. Copy the token (you won't see it again)
+# 5. Add it as DOCKER_PASSWORD in GitHub Secrets
+```
+
+### Why Access Tokens Instead of Passwords?
+
+- Tokens can be scoped (limited permissions)
+- Tokens can be revoked without changing your password
+- Tokens don't require 2FA in CI
+- Tokens are disposable
+
+---
+
+## CI/CD Best Practices
+
+### 1. Fast Feedback Loop
+
+Put fastest checks first. Linting is instant, type-checking takes seconds, tests take minutes.
+
+### 2. Parallel Jobs
+
+Run independent jobs in parallel. Quality and security don't depend on each other.
+
+### 3. Caching Strategy
+
+```yaml
+cache: npm                           # Cache npm packages
+cache-from: type=gha                 # Cache Docker layers
+```
+
+Caching reduces build times from minutes to seconds on repeat runs.
+
+### 4. Branch Protection
+
+Configure in GitHub: **Settings > Branches > Branch protection rules**
+- Require CI to pass before merging
+- Require pull request reviews
+- Dismiss stale reviews on push
+
+### 5. Minimal Permissions
+
+Only push Docker images on main branch. PRs only run quality and security checks.
+
+### 6. Proper Tagging
+
+Use `sha-<hash>` tags for traceability. Every image is linked to a specific commit.
+
+### 7. Fail Fast
+
+Use `--audit-level=high` and `severity: HIGH,CRITICAL` to only block on serious issues. Low-severity findings can be addressed separately.
+
+---
+
+## CI/CD Commands
+
+### Monitoring Workflows
+
+```bash
+# List recent workflow runs
+gh run list
+
+# View specific run details
+gh run view <run-id>
+
+# View run logs
+gh run view <run-id> --log
+
+# Watch a run in real-time
+gh run watch
+
+# Re-run a failed workflow
+gh run rerun <run-id>
+```
+
+### Manual Triggers
+
+```bash
+# Trigger workflow manually (requires workflow_dispatch in on:)
+gh workflow run ci.yml
+
+# Trigger with parameters
+gh workflow run ci.yml -f environment=staging
+```
+
+### Debugging Failed Runs
+
+```bash
+# View failed step logs
+gh run view <run-id> --log-failed
+
+# Re-run only failed jobs
+gh run rerun <run-id> --failed
+```
+
+---
+
+## Common CI/CD Issues
+
+### Issue 1: npm ci Fails on Lock File Mismatch
+
+**Error:**
+```
+npm ERR! The `npm ci` command can only install with an existing package-lock.json
+```
+
+**Cause:** Lock file missing or out of sync with package.json.
+
+**Solution:**
+```bash
+npm install          # Regenerate lock file
+git add package-lock.json
+git commit -m "chore: update package-lock.json"
+```
+
+### Issue 2: Prisma Generate Fails in CI
+
+**Error:**
+```
+Error: Could not find Prisma client
+```
+
+**Cause:** Prisma client not generated before type-check/test.
+
+**Solution:** Add explicit generate step before type-check:
+```yaml
+- name: Generate Prisma client
+  run: npx prisma generate
+```
+
+### Issue 3: Docker Login Fails
+
+**Error:**
+```
+Error: denied: requested access to the resource is denied
+```
+
+**Cause:** Invalid or missing Docker Hub credentials.
+
+**Solution:**
+1. Verify secrets are set in GitHub Settings
+2. Regenerate Docker Hub access token
+3. Update `DOCKER_PASSWORD` secret
+
+### Issue 4: Working Directory Issues
+
+**Error:**
+```
+npm ERR! Could not read package.json
+```
+
+**Cause:** Workflow runs at repo root, but package.json is in `task-manager/`.
+
+**Solution:** Set working directory:
+```yaml
+defaults:
+  run:
+    working-directory: task-manager
+```
+
+### Issue 5: Cache Miss on First Run
+
+**Cause:** No cache exists yet. First run always builds from scratch.
+
+**Solution:** This is expected. Subsequent runs will be faster.
+
+---
+
+## What You've Learned in Phase 3
+
+### Technologies Mastered:
+- ✅ GitHub Actions workflow syntax
+- ✅ CI/CD pipeline design
+- ✅ Automated quality gates
+- ✅ Docker image building in CI
+- ✅ Docker Hub registry integration
+- ✅ Security scanning (npm audit, Trivy)
+- ✅ GitHub Secrets management
+
+### Core Concepts:
+- ✅ Event-driven automation (push, PR triggers)
+- ✅ Job dependencies and parallel execution
+- ✅ Caching strategies for faster builds
+- ✅ Image tagging for traceability
+- ✅ Security scanning integration
+- ✅ Branch protection patterns
+- ✅ Working directory configuration
+
+### Best Practices:
+- ✅ Fastest checks first (lint → type-check → test)
+- ✅ Parallel independent jobs
+- ✅ Build caching (npm packages + Docker layers)
+- ✅ Secrets management (never hardcoded)
+- ✅ Conditional job execution (Docker only on main)
+- ✅ Proper image tagging (SHA + latest)
+- ✅ Fail-fast with appropriate severity levels
+
+---
+
+## Next Steps: Phase 4
+
+In Phase 4, you'll learn:
+- Kubernetes fundamentals (Pods, Services, Deployments)
+- Helm chart development
+- Deployment strategies and rollout management
+- Health checks, resource limits, and autoscaling
+- Networking with Ingress and Services
+- ConfigMaps and Secrets for configuration
+
+This will orchestrate your containerized application at scale.
+
+---
+
 ## Resources for Further Learning
 
 ### Docker
@@ -1782,30 +2410,12 @@ This will automate your build, test, and deployment processes.
 
 ## Resources for Further Learning
 
-### React & Next.js
-- [Next.js Documentation](https://nextjs.org/docs)
-- [React Documentation](https://react.dev)
-- [Next.js App Router Guide](https://nextjs.org/docs/app)
-
-### TypeScript
-- [TypeScript Handbook](https://www.typescriptlang.org/docs/)
-- [TypeScript Deep Dive](https://basarat.gitbook.io/typescript/)
-
-### Testing
-- [Jest Documentation](https://jestjs.io/)
-- [React Testing Library](https://testing-library.com/react)
-
-### Prisma
-- [Prisma Documentation](https://www.prisma.io/docs)
-- [Prisma Schema Reference](https://www.prisma.io/docs/reference/api-reference/prisma-schema-reference)
-
-### Docker & DevOps
-- [Docker Documentation](https://docs.docker.com/)
-- [Docker Compose Documentation](https://docs.docker.com/compose/)
-- [Next.js Deployment: Docker](https://nextjs.org/docs/app/building-your-application/deploying#docker-image)
-- [Docker Multi-Stage Builds](https://docs.docker.com/build/building/multi-stage/)
-- [Dockerfile Best Practices](https://docs.docker.com/develop/develop-images/dockerfile_best-practices/)
+### CI/CD & GitHub Actions
+- [GitHub Actions Documentation](https://docs.github.com/en/actions)
+- [GitHub Actions Workflow Syntax](https://docs.github.com/en/actions/reference/workflow-syntax-for-github-actions)
+- [Trivy Vulnerability Scanner](https://trivy.dev/)
+- [Docker Hub](https://hub.docker.com/)
 
 ---
 
-**Remember**: The best way to learn is to build. You've successfully built a fully functional task manager with authentication. This foundation will serve you well as you move into DevOps topics in the next phases!
+**Remember**: The best way to learn is to build. You've successfully built a fully functional task manager with authentication, containerized it, and set up automated CI/CD pipelines. This foundation will serve you well as you move into Kubernetes orchestration in Phase 4!
