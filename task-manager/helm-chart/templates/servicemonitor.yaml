@@ -14,6 +14,6 @@ spec:
       {{- include "task-manager.selectorLabels" . | nindent 6 }}
   endpoints:
     - port: http
-      path: /metrics
+      path: /api/metrics
       interval: {{ .Values.monitoring.serviceMonitor.scrapeInterval }}
 {{- end }}
