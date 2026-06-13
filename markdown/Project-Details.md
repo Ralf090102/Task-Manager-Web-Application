@@ -42,6 +42,13 @@ This document explains the core concepts and technologies implemented in Phase 1
 34. [Resource Limits](#resource-limits)
 35. [Kubernetes Networking Flow](#kubernetes-networking-flow)
 36. [Troubleshooting Kubernetes Deployment](#troubleshooting-kubernetes-deployment)
+37. [What is Observability?](#what-is-observability)
+38. [Prometheus Metrics Collection](#prometheus-metrics-collection)
+39. [Application Metrics with prom-client](#application-metrics-with-prom-client)
+40. [ServiceMonitor Configuration](#servicemonitor-configuration)
+41. [Grafana Dashboards](#grafana-dashboards)
+42. [Structured Logging with pino](#structured-logging-with-pino)
+43. [Troubleshooting Monitoring Setup](#troubleshooting-monitoring-setup)
 
 ---
 
@@ -3168,6 +3175,565 @@ This will give you visibility into your application's health and performance in 
 
 ---
 
+## What is Observability?
+
+### Monitoring vs Observability
+
+**Monitoring** tells you *when* something is wrong. **Observability** tells you *why*.
+
+Observability has three pillars:
+
+| Pillar | What | Tool in This Project |
+|--------|------|---------------------|
+| **Metrics** | Numeric data over time (CPU, request count, latency) | Prometheus + prom-client |
+| **Logs** | Discrete events with context (who did what, when) | pino (structured JSON) |
+| **Traces** | Request flow across services (not implemented here) | Jaeger / OpenTelemetry |
+
+### The Metrics Pipeline
+
+```
+Your App (prom-client)
+  → /api/metrics endpoint (Prometheus text format)
+    → ServiceMonitor (tells Prometheus to scrape)
+      → Prometheus (stores time-series data)
+        → Grafana (queries Prometheus, renders dashboards)
+```
+
+**How it works step by step:**
+1. `prom-client` maintains in-memory counters and histograms in your Node.js process
+2. When Prometheus scrapes `/api/metrics`, prom-client outputs all metrics in text format
+3. Prometheus stores each scrape as a time-series data point
+4. Grafana queries Prometheus using PromQL and renders charts
+
+---
+
+## Prometheus Metrics Collection
+
+### What is Prometheus?
+
+Prometheus is a time-series database that collects metrics by **pulling** (scraping) HTTP endpoints. It does NOT receive pushed data (unlike many logging systems).
+
+### kube-prometheus-stack
+
+Instead of installing Prometheus, Grafana, and Alertmanager separately, we use the `kube-prometheus-stack` Helm chart — it bundles all three plus the Prometheus Operator (which manages ServiceMonitor resources).
+
+```bash
+# Install the monitoring stack
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update
+helm install monitoring prometheus-community/kube-prometheus-stack \
+  --namespace monitoring --create-namespace \
+  --set grafana.adminPassword=admin
+```
+
+### Components Installed
+
+| Component | Purpose | Pods |
+|-----------|---------|------|
+| **Prometheus** | Scrapes and stores metrics | `prometheus-monitoring-*` |
+| **Grafana** | Visualization dashboards | `monitoring-grafana-*` |
+| **Alertmanager** | Routes alerts to notifications | `alertmanager-monitoring-*` |
+| **node-exporter** | Host-level CPU/memory/disk metrics | `monitoring-prometheus-node-exporter-*` |
+| **kube-state-metrics** | Kubernetes object state metrics | `monitoring-kube-state-metrics-*` |
+| **Prometheus Operator** | Manages Prometheus config via CRDs | `monitoring-kube-prometheus-operator-*` |
+
+### Accessing Prometheus and Grafana
+
+On Windows with Docker driver, Minikube's internal IPs are unreachable (see Issue 3 in Troubleshooting Kubernetes Deployment). Use `kubectl port-forward`:
+
+```bash
+# Grafana UI (admin/admin)
+kubectl port-forward -n monitoring svc/monitoring-grafana 3001:80
+# Open http://localhost:3001
+
+# Prometheus UI
+kubectl port-forward -n monitoring svc/monitoring-kube-prometheus-prometheus 9090:9090
+# Open http://localhost:9090
+```
+
+**Why port-forward and not Ingress?** Port-forward creates a direct tunnel to a specific pod. It's simpler than creating separate Ingress routes for each monitoring tool, and sufficient for local development.
+
+### Prometheus UI
+
+The Prometheus web UI lets you:
+- **Targets** (`Status > Targets`): See what Prometheus is scraping and their health
+- **Query** (`/graph`): Run PromQL queries interactively
+- **Alerts** (`/alerts`): View firing alerts
+
+**Example PromQL queries:**
+```promql
+# Request rate (requests per second over last 5 min)
+rate(http_request_duration_seconds_count[5m])
+
+# 99th percentile latency
+histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))
+
+# Total task operations by type
+sum(task_operations_total) by (operation)
+```
+
+---
+
+## Application Metrics with prom-client
+
+### What is prom-client?
+
+`prom-client` is the official Node.js client library for Prometheus. It provides:
+- **Counter**: A value that only goes up (e.g., total requests)
+- **Histogram**: Distribution of values across buckets (e.g., request latency)
+- **Gauge**: A value that goes up and down (e.g., active connections)
+- **Default metrics**: Automatic Node.js process metrics (CPU, memory, GC, event loop)
+
+### Metrics Library
+
+```typescript
+// src/lib/metrics.ts
+import { register, Counter, Histogram, collectDefaultMetrics } from "prom-client";
+
+// Collect Node.js default metrics (CPU, memory, GC, event loop)
+collectDefaultMetrics({ register });
+
+// HTTP request duration histogram
+export const httpRequestDuration = new Histogram({
+  name: "http_request_duration_seconds",
+  help: "Duration of HTTP requests in seconds",
+  labelNames: ["method", "route", "status_code"],
+  buckets: [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10],
+});
+
+// Task operations counter
+export const taskOperations = new Counter({
+  name: "task_operations_total",
+  help: "Total number of task operations",
+  labelNames: ["operation", "status"],
+});
+
+// Helper functions
+export function observeRequest(
+  method: string,
+  route: string,
+  statusCode: number,
+  durationSeconds: number
+) {
+  httpRequestDuration
+    .labels(method, route, String(statusCode))
+    .observe(durationSeconds);
+}
+
+export function trackTaskOperation(operation: string, status: string) {
+  taskOperations.labels(operation, status).inc();
+}
+
+export { register };
+```
+
+**Key concepts:**
+- `collectDefaultMetrics`: Automatically tracks `process_cpu_seconds_total`, `process_resident_memory_bytes`, `nodejs_eventloop_lag`, etc.
+- `Histogram` buckets define latency ranges: `[0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10]` seconds
+- Labels allow filtering: `http_request_duration_seconds_count{method="GET",route="/api/tasks"}`
+- `register` holds all metrics and outputs them in Prometheus text format
+
+### Metrics Endpoint
+
+```typescript
+// src/app/api/metrics/route.ts
+import { NextResponse } from "next/server";
+import { register } from "@/lib/metrics";
+
+export async function GET() {
+  const metrics = await register.metrics();
+  return new NextResponse(metrics, {
+    headers: { "Content-Type": register.contentType },
+  });
+}
+```
+
+This endpoint returns metrics in Prometheus text format:
+
+```
+# HELP http_request_duration_seconds Duration of HTTP requests in seconds
+# TYPE http_request_duration_seconds histogram
+http_request_duration_seconds_bucket{method="GET",route="/api/tasks",status_code="200",le="0.05"} 3
+http_request_duration_seconds_bucket{method="GET",route="/api/tasks",status_code="200",le="0.1"} 5
+http_request_duration_seconds_bucket{method="GET",route="/api/tasks",status_code="200",le="+Inf"} 5
+http_request_duration_seconds_count{method="GET",route="/api/tasks",status_code="200"} 5
+http_request_duration_seconds_sum{method="GET",route="/api/tasks",status_code="200"} 0.234
+
+# HELP task_operations_total Total number of task operations
+# TYPE task_operations_total counter
+task_operations_total{operation="create",status="success"} 2
+task_operations_total{operation="delete",status="success"} 1
+```
+
+### Integrating Metrics into API Routes
+
+Each API handler tracks timing and operation outcomes:
+
+```typescript
+// src/app/api/tasks/route.ts (POST handler)
+export async function POST(req: Request) {
+  const start = Date.now();  // Start timer
+  try {
+    const session = await auth();
+    if (!session?.user?.id) {
+      observeRequest("POST", "/api/tasks", 401, (Date.now() - start) / 1000);
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+    // ... validation and creation ...
+    trackTaskOperation("create", "success");
+    observeRequest("POST", "/api/tasks", 201, (Date.now() - start) / 1000);
+    return NextResponse.json(task, { status: 201 });
+  } catch (err) {
+    trackTaskOperation("create", "error");
+    observeRequest("POST", "/api/tasks", 500, (Date.now() - start) / 1000);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+  }
+}
+```
+
+**Pattern:** Every code path (success, validation error, auth failure, server error) records the duration and outcome. This gives complete visibility into API performance.
+
+---
+
+## ServiceMonitor Configuration
+
+### What is a ServiceMonitor?
+
+A ServiceMonitor is a Custom Resource Definition (CRD) from the Prometheus Operator. It tells Prometheus: "Scrape the pods behind this Kubernetes Service at path X every Y seconds."
+
+Without a ServiceMonitor, Prometheus only scrapes infrastructure components (kubelet, node-exporter, etc.) but NOT your application.
+
+### ServiceMonitor Template
+
+```yaml
+# task-manager/helm-chart/templates/servicemonitor.yaml
+{{- if .Values.monitoring.enabled -}}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "task-manager.fullname" . }}
+  labels:
+    {{- include "task-manager.labels" . | nindent 4 }}
+    {{- with .Values.monitoring.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "task-manager.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: http
+      path: /api/metrics
+      interval: {{ .Values.monitoring.serviceMonitor.scrapeInterval }}
+{{- end }}
+```
+
+### Values Configuration
+
+```yaml
+# task-manager/helm-chart/values.yaml (added section)
+monitoring:
+  enabled: true
+  serviceMonitor:
+    scrapeInterval: 15s
+    labels:
+      release: monitoring
+```
+
+### The `release: monitoring` Label — Critical!
+
+The Prometheus Operator only picks up ServiceMonitors that match its configured label selector. The `kube-prometheus-stack` chart uses `release: <release-name>` as the selector. Since we installed with `helm install monitoring ...`, the selector label is `release: monitoring`.
+
+**Without this label, Prometheus will NOT scrape your app.** The ServiceMonitor exists but is invisible to Prometheus.
+
+### How Prometheus Discovers Targets
+
+1. Prometheus Operator watches for ServiceMonitor resources with matching labels
+2. For each ServiceMonitor, it reads the `selector` to find the Kubernetes Service
+3. It finds the pods behind that Service via endpoint discovery
+4. It scrapes each pod at the configured `path` and `port` every `interval`
+
+```
+ServiceMonitor (label: release=monitoring)
+  → selects Service (labels: app=task-manager)
+    → finds Pods (via endpoints)
+      → scrapes http://<pod-ip>:3000/api/metrics every 15s
+```
+
+---
+
+## Grafana Dashboards
+
+### Accessing Grafana
+
+```bash
+kubectl port-forward -n monitoring svc/monitoring-grafana 3001:80
+# Open http://localhost:3001, login: admin/admin
+```
+
+### Using Grafana Explore
+
+Grafana's Explore feature lets you run PromQL queries without building a dashboard:
+
+1. Click the compass icon (Explore) in the left sidebar
+2. Select "Prometheus" as the data source
+3. Enter a PromQL query and run it
+
+**Useful queries to try:**
+
+```promql
+# All HTTP requests in the last 5 minutes
+rate(http_request_duration_seconds_count[5m])
+
+# Request duration p99 (slowest 1% of requests)
+histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))
+
+# Task operations by type
+sum(task_operations_total) by (operation)
+
+# Pod memory usage
+container_memory_working_set_bytes{namespace="task-manager"}
+
+# Node CPU usage
+rate(node_cpu_seconds_total{mode!="idle"}[5m])
+```
+
+### Pre-built Dashboards
+
+The `kube-prometheus-stack` includes several pre-built dashboards accessible from Dashboards > Browse:
+- **Node Exporter / Nodes**: Host CPU, memory, disk, network
+- **Kubernetes / Compute Resources / Cluster**: Cluster-wide resource usage
+- **Kubernetes / API Server**: Kubernetes API server performance
+- **Prometheus / Overview**: Prometheus self-monitoring
+
+---
+
+## Structured Logging with pino
+
+### Why Structured Logging?
+
+**Unstructured (bad):**
+```
+console.log("User " + userId + " created task " + taskId);
+```
+Hard to search, filter, or parse programmatically.
+
+**Structured (good):**
+```typescript
+logger.info({ userId, taskId }, "Task created");
+```
+Outputs JSON:
+```json
+{"level":"info","time":"2026-06-13T21:30:00.000Z","userId":"abc123","taskId":"def456","msg":"Task created"}
+```
+Easy to search by field, pipe to log aggregation systems (ELK, Loki, Datadog).
+
+### pino Logger Configuration
+
+```typescript
+// src/lib/logger.ts
+import pino from "pino";
+
+const logger = pino({
+  level: process.env.LOG_LEVEL || "info",
+  formatters: {
+    level(label) {
+      return { level: label };  // Use string labels ("info") instead of numbers (30)
+    },
+  },
+  timestamp: pino.stdTimeFunctions.isoTime,  // ISO 8601 timestamps
+});
+
+export default logger;
+```
+
+**Configuration options:**
+- `level`: Minimum log level (`fatal`, `error`, `warn`, `info`, `debug`, `trace`)
+- `formatters.level`: Outputs `"level": "info"` instead of `"level": 30`
+- `timestamp`: ISO 8601 format (`"2026-06-13T21:30:00.000Z"`)
+
+### Logging in API Routes
+
+```typescript
+// Success logging
+logger.info({ taskId: task.id, userId: session.user.id }, "Task created");
+
+// Error logging with stack trace
+logger.error({ err }, "Failed to create task");
+```
+
+**Best practices:**
+- First argument: JSON object with contextual data (IDs, user info)
+- Second argument: Human-readable message
+- Never log secrets (passwords, tokens, session data)
+- Use `logger.error` for caught exceptions, `logger.warn` for degraded behavior, `logger.info` for normal operations
+- Avoid `logger.debug` in production (set `LOG_LEVEL=info`)
+
+### Viewing Logs in Kubernetes
+
+```bash
+# View application logs (includes pino JSON output)
+kubectl logs -n task-manager deployment/task-manager --tail=50
+
+# Follow logs in real-time
+kubectl logs -n task-manager deployment/task-manager -f
+
+# Search for errors
+kubectl logs -n task-manager deployment/task-manager | grep '"level":"error"'
+```
+
+---
+
+## Troubleshooting Monitoring Setup
+
+### Issue 1: Prometheus Target Shows "down" with 404
+
+**Error (in Prometheus > Status > Targets):**
+```
+lastError: server returned HTTP status 404 Not Found
+health: down
+```
+
+**Cause:** The ServiceMonitor points to `/metrics` but the Next.js metrics route is at `/api/metrics`.
+
+**Solution:** Update the ServiceMonitor path:
+```yaml
+endpoints:
+  - port: http
+    path: /api/metrics    # NOT /metrics
+    interval: 15s
+```
+
+**Lesson:** In Next.js App Router, API routes are under `/api/`. The Prometheus convention is `/metrics`, but the actual route path depends on your framework.
+
+---
+
+### Issue 2: Helm Upgrade Fails with "nil pointer evaluating interface {}.enabled"
+
+**Error:**
+```
+Error: UPGRADE FAILED: task-manager/templates/servicemonitor.yaml:1:14
+  nil pointer evaluating interface {}.enabled
+```
+
+**Cause:** `--reuse-values` reuses values from the previous release, which didn't have the `monitoring` section. The template tries to access `.Values.monitoring.enabled` on a nil value.
+
+**Solution:** Pass the new keys explicitly alongside `--reuse-values`:
+```bash
+helm upgrade task-manager ./helm-chart --namespace task-manager \
+  --reuse-values \
+  --set monitoring.enabled=true \
+  --set monitoring.serviceMonitor.scrapeInterval=15s \
+  --set monitoring.serviceMonitor.labels.release=monitoring
+```
+
+**Lesson:** `--reuse-values` does NOT merge in new keys from an updated `values.yaml`. It only reuses the values from the previous release. New keys must be passed via `--set` or `--values`.
+
+---
+
+### Issue 3: Prometheus Not Picking Up ServiceMonitor (Target Missing)
+
+**Symptom:** No task-manager target appears in Prometheus > Status > Targets.
+
+**Cause:** The ServiceMonitor is missing the `release: monitoring` label that the Prometheus Operator uses for discovery.
+
+**Solution:** Add the label to the ServiceMonitor:
+```yaml
+metadata:
+  labels:
+    release: monitoring    # Must match your Prometheus release name
+```
+
+Or via Helm values:
+```yaml
+monitoring:
+  serviceMonitor:
+    labels:
+      release: monitoring
+```
+
+**Verification:**
+```bash
+# Check ServiceMonitor labels
+kubectl get servicemonitor task-manager -n task-manager -o jsonpath='{.metadata.labels.release}'
+# Should output: monitoring
+```
+
+---
+
+### Issue 4: Port-Forward Connection Refused
+
+**Error:**
+```
+Unable to connect to the remote server
+```
+
+**Cause:** The port-forward process was killed or the pod restarted.
+
+**Solution:** Restart the port-forward. Also verify the service exists:
+```bash
+# Check services exist
+kubectl get svc -n monitoring
+
+# Re-establish port-forward
+kubectl port-forward -n monitoring svc/monitoring-grafana 3001:80
+```
+
+**Note:** Port-forwards are ephemeral. They die when the terminal closes or the pod restarts. For persistent access, use Ingress (but that requires separate hostnames or path-based routing).
+
+---
+
+## What You've Learned in Phase 5
+
+### Technologies Mastered:
+- ✅ Prometheus metrics collection and PromQL
+- ✅ Grafana dashboard visualization
+- ✅ prom-client for Node.js metrics
+- ✅ ServiceMonitor and Prometheus Operator
+- ✅ kube-prometheus-stack Helm chart
+- ✅ Structured JSON logging with pino
+- ✅ kubectl port-forward for accessing cluster services
+
+### Core Concepts:
+- ✅ The three pillars of observability (metrics, logs, traces)
+- ✅ Pull-based metrics collection (Prometheus scrapes, doesn't receive pushes)
+- ✅ Metric types: Counter, Histogram, Gauge
+- ✅ Prometheus Operator and CRD-based configuration
+- ✅ Service discovery via labels and selectors
+- ✅ Structured logging vs unstructured logging
+- ✅ Time-series data and PromQL queries
+
+### Best Practices:
+- ✅ Track both timing and outcome for every API request
+- ✅ Use labels for filtering (method, route, status_code)
+- ✅ Log contextual data as JSON (user IDs, task IDs)
+- ✅ Never log secrets or sensitive data
+- ✅ Use appropriate log levels (error, warn, info)
+- ✅ Default metrics for infrastructure visibility
+- ✅ `release: monitoring` label for Prometheus Operator discovery
+
+### Troubleshooting Skills:
+- ✅ Diagnosing 404s in Prometheus targets (wrong metrics path)
+- ✅ Fixing nil pointer errors in Helm upgrades with --reuse-values
+- ✅ Debugging missing Prometheus targets (label selector issues)
+- ✅ Using port-forward to access monitoring UIs
+- ✅ Querying Prometheus API for target health and metric values
+
+---
+
+## Next Steps: Phase 6
+
+In Phase 6, you'll learn:
+- Performance optimization (caching, bundle size, query optimization)
+- Security hardening (CSP headers, rate limiting, OWASP compliance)
+- Backup and disaster recovery strategies
+- Load testing with k6
+- Production readiness checklist
+
+This will prepare your application for real-world production deployment.
+
+---
+
 ## Resources for Further Learning
 
 ### Docker
@@ -3198,6 +3764,14 @@ This will give you visibility into your application's health and performance in 
 - [NGINX Ingress Controller](https://kubernetes.github.io/ingress-nginx/)
 - [kubectl Cheat Sheet](https://kubernetes.io/docs/reference/kubectl/cheatsheet/)
 
+### Monitoring & Observability
+- [Prometheus Documentation](https://prometheus.io/docs/)
+- [PromQL Tutorial](https://prometheus.io/docs/prometheus/latest/querying/basics/)
+- [Grafana Documentation](https://grafana.com/docs/)
+- [prom-client (Node.js)](https://github.com/siimon/prom-client)
+- [kube-prometheus-stack](https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack)
+- [pino Logger](https://github.com/pinojs/pino)
+
 ---
 
-**Remember**: The best way to learn is to build. You've successfully built a fully functional task manager with authentication, containerized it, set up automated CI/CD pipelines, and deployed it to Kubernetes with Helm. This foundation will serve you well as you move into monitoring and observability in Phase 5!
+**Remember**: The best way to learn is to build. You've successfully built a fully functional task manager with authentication, containerized it, set up automated CI/CD pipelines, deployed it to Kubernetes, and added comprehensive monitoring and observability. This is a production-ready foundation that demonstrates real-world DevOps skills!

@@ -135,3 +135,39 @@ Uses Tailwind v4 with new `@import "tailwindcss"` syntax in `globals.css`. Do NO
 - `minikube tunnel` must be running for browser access on Windows/Docker driver
 - `image.pullPolicy: Never` for local Minikube dev (uses pre-loaded image)
 - Resource limits: 500m CPU / 512Mi memory; requests: 250m CPU / 256Mi memory
+
+## Monitoring & Observability (Phase 5)
+
+- Monitoring stack: `kube-prometheus-stack` Helm chart in `monitoring` namespace
+- Components: Prometheus (metrics scraping), Grafana (dashboards), Alertmanager, node-exporter
+- App metrics: `prom-client` library, exposed at `/api/metrics`
+- Structured logging: `pino` logger (JSON format), configured in `src/lib/logger.ts`
+- ServiceMonitor: `task-manager/helm-chart/templates/servicemonitor.yaml`
+  - Label `release: monitoring` required for Prometheus Operator discovery
+  - Scrapes `/api/metrics` every 15s on the `http` port
+- Accessing monitoring UIs (requires `kubectl port-forward`):
+  ```bash
+  # Grafana (admin/admin)
+  kubectl port-forward -n monitoring svc/monitoring-grafana 3001:80
+  # Open http://localhost:3001
+
+  # Prometheus
+  kubectl port-forward -n monitoring svc/monitoring-kube-prometheus-prometheus 9090:9090
+  # Open http://localhost:9090
+  ```
+- Installing the monitoring stack:
+  ```bash
+  helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+  helm repo update
+  helm install monitoring prometheus-community/kube-prometheus-stack \
+    --namespace monitoring --create-namespace \
+    --set grafana.adminPassword=admin
+  ```
+- Helm upgrade with new ServiceMonitor keys (when `--reuse-values` doesn't merge new keys):
+  ```bash
+  helm upgrade task-manager ./task-manager/helm-chart --namespace task-manager \
+    --reuse-values \
+    --set monitoring.enabled=true \
+    --set monitoring.serviceMonitor.scrapeInterval=15s \
+    --set monitoring.serviceMonitor.labels.release=monitoring
+  ```
