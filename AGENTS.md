@@ -96,3 +96,42 @@ Uses Tailwind v4 with new `@import "tailwindcss"` syntax in `globals.css`. Do NO
 - JWT session strategy with custom ID injection via callbacks
 - Sign-in page: `/login` (custom route)
 - Session accessible via `auth()` from `@/lib/auth`
+
+## Kubernetes (Phase 4)
+
+- Helm chart: `task-manager/helm-chart/` (Chart v1.0.0, appVersion 1.0.0)
+- Local dev: Minikube with Docker driver, K8s v1.35.1
+- Image: `ralf090102/task-manager-app:latest` loaded into Minikube (no remote pull)
+- Database: connects to external Supabase PostgreSQL (not in-cluster)
+- Access via NGINX Ingress + `minikube tunnel` + hosts file entry
+- Common commands:
+  ```bash
+  # Start Minikube
+  minikube start --driver=docker
+
+  # Enable NGINX Ingress controller
+  minikube addons enable ingress
+
+  # Build image inside Minikube's Docker daemon
+  minikube image build -t ralf090102/task-manager-app:latest -f Dockerfile D:\GitHub\Task-Manager-Web-Application\task-manager
+
+  # Install/upgrade Helm release
+  helm install task-manager ./task-manager/helm-chart --namespace task-manager --create-namespace --set secrets.databaseUrl=<URL> --set secrets.nextauthSecret=<SECRET> --set secrets.nextauthUrl=http://task-manager.local --set image.pullPolicy=Never
+  helm upgrade task-manager ./task-manager/helm-chart --namespace task-manager --reuse-values
+
+  # Access the app
+  minikube tunnel    # Run in background, routes Ingress to 127.0.0.1
+  # Hosts file: 127.0.0.1 task-manager.local
+  # Then open http://task-manager.local in browser
+
+  # Check resources
+  kubectl get all -n task-manager
+  kubectl logs -n task-manager deployment/task-manager --tail=20
+
+  # Uninstall
+  helm uninstall task-manager --namespace task-manager
+  minikube stop
+  ```
+- `minikube tunnel` must be running for browser access on Windows/Docker driver
+- `image.pullPolicy: Never` for local Minikube dev (uses pre-loaded image)
+- Resource limits: 500m CPU / 512Mi memory; requests: 250m CPU / 256Mi memory

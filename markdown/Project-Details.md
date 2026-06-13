@@ -34,6 +34,14 @@ This document explains the core concepts and technologies implemented in Phase 1
 26. [Docker Build & Push Job](#docker-build--push-job)
 27. [GitHub Secrets Configuration](#github-secrets-configuration)
 28. [CI/CD Best Practices](#cicd-best-practices)
+29. [Kubernetes Fundamentals](#kubernetes-fundamentals)
+30. [Helm Chart Development](#helm-chart-development)
+31. [Minikube for Local Development](#minikube-for-local-development)
+32. [Deploying with Helm](#deploying-with-helm)
+33. [Health Checks and Probes](#health-checks-and-probes)
+34. [Resource Limits](#resource-limits)
+35. [Kubernetes Networking Flow](#kubernetes-networking-flow)
+36. [Troubleshooting Kubernetes Deployment](#troubleshooting-kubernetes-deployment)
 
 ---
 
@@ -2377,17 +2385,786 @@ defaults:
 
 ---
 
-## Next Steps: Phase 4
+## Kubernetes Fundamentals
 
-In Phase 4, you'll learn:
-- Kubernetes fundamentals (Pods, Services, Deployments)
-- Helm chart development
-- Deployment strategies and rollout management
-- Health checks, resource limits, and autoscaling
-- Networking with Ingress and Services
-- ConfigMaps and Secrets for configuration
+### What is Kubernetes?
 
-This will orchestrate your containerized application at scale.
+Kubernetes (K8s) is a container orchestration platform that automates deployment, scaling, and management of containerized applications. While Docker runs individual containers, Kubernetes manages hundreds of containers across multiple machines.
+
+### Key Concepts
+
+**1. Pods**: The smallest deployable unit in Kubernetes. A pod runs one or more containers that share storage and network.
+
+```yaml
+# A pod running your task-manager container
+apiVersion: v1
+kind: Pod
+metadata:
+  name: task-manager
+spec:
+  containers:
+    - name: task-manager
+      image: ralf090102/task-manager-app:latest
+      ports:
+        - containerPort: 3000
+```
+
+**2. Deployments**: Manage replica sets of pods. Ensures the desired number of pods are always running, handles rolling updates and rollbacks.
+
+**3. Services**: Provide stable networking for pods. Since pods can be created and destroyed, Services give them a fixed IP and DNS name.
+
+**4. Ingress**: Exposes HTTP routes from outside the cluster to Services. Acts as an entry point with host-based routing.
+
+**5. Secrets**: Store sensitive data (passwords, API keys) separately from pod definitions.
+
+**6. Namespaces**: Virtual clusters within a physical cluster. Isolate resources (e.g., `task-manager` namespace).
+
+### Why Kubernetes Over Docker Compose?
+
+| Docker Compose | Kubernetes |
+|----------------|------------|
+| Single machine | Multiple machines (cluster) |
+| Manual scaling | Auto-scaling |
+| No self-healing | Auto-restarts failed pods |
+| Basic networking | Advanced service mesh |
+| Manual rollouts | Rolling updates & rollbacks |
+| Development tool | Production orchestration |
+
+---
+
+## Helm Chart Development
+
+### What is Helm?
+
+Helm is the package manager for Kubernetes. A Helm chart is a collection of templates and values that define a complete application deployment. Think of it as "Docker Compose for Kubernetes" — but templated and versioned.
+
+### Chart Structure
+
+```
+task-manager/helm-chart/
+├── Chart.yaml          # Chart metadata (name, version)
+├── values.yaml         # Default configuration values
+└── templates/
+    ├── _helpers.tpl    # Reusable template helpers
+    ├── deployment.yaml # Pod deployment spec
+    ├── service.yaml    # ClusterIP service
+    ├── ingress.yaml    # NGINX ingress routing
+    └── secret.yaml     # Opaque secrets (base64-encoded)
+```
+
+### Chart.yaml — Chart Metadata
+
+```yaml
+# task-manager/helm-chart/Chart.yaml
+apiVersion: v2
+name: task-manager
+description: Task Manager Web Application
+type: application
+version: 1.0.0          # Chart version (changes when you modify templates)
+appVersion: "1.0.0"     # Application version
+```
+
+**Key fields:**
+- `apiVersion: v2` — Helm 3 chart format
+- `version` — The chart version, incremented when templates change
+- `appVersion` — The version of the application being deployed
+
+### values.yaml — Default Configuration
+
+```yaml
+# task-manager/helm-chart/values.yaml
+replicaCount: 1
+
+image:
+  repository: ralf090102/task-manager-app
+  pullPolicy: IfNotPresent
+  tag: latest
+
+service:
+  type: ClusterIP
+  port: 3000
+
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: task-manager.local
+      paths:
+        - path: /
+          pathType: Prefix
+
+secrets:
+  databaseUrl: ""
+  nextauthSecret: ""
+  nextauthUrl: "http://task-manager.local"
+  authTrustHost: "true"
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 250m
+    memory: 256Mi
+```
+
+**Overriding values at install time:**
+```bash
+helm install task-manager ./helm-chart \
+  --set secrets.databaseUrl="postgresql://..." \
+  --set secrets.nextauthSecret="my-secret" \
+  --set image.pullPolicy=Never
+```
+
+### _helpers.tpl — Reusable Template Helpers
+
+```yaml
+# task-manager/helm-chart/templates/_helpers.tpl
+
+{{- define "task-manager.name" -}}
+{{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "task-manager.fullname" -}}
+{{- if .Values.fullnameOverride }}
+{{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
+{{- else }}
+{{- .Chart.Name }}
+{{- end }}
+{{- end }}
+
+{{- define "task-manager.labels" -}}
+helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+app.kubernetes.io/name: {{ include "task-manager.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/version: {{ .Chart.AppVersion }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end }}
+
+{{- define "task-manager.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "task-manager.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+```
+
+**What these do:**
+- `task-manager.name` — Returns the chart name, truncated to 63 chars (K8s name limit)
+- `task-manager.fullname` — Returns the full resource name
+- `task-manager.labels` — Standard Kubernetes labels for resource tracking
+- `task-manager.selectorLabels` — Labels used to match pods to services/deployments
+
+### Deployment Template
+
+```yaml
+# task-manager/helm-chart/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "task-manager.fullname" . }}
+  labels:
+    {{- include "task-manager.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "task-manager.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "task-manager.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "task-manager.fullname" . }}-secrets
+                  key: database-url
+            - name: NEXTAUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "task-manager.fullname" . }}-secrets
+                  key: nextauth-secret
+            - name: NEXTAUTH_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "task-manager.fullname" . }}-secrets
+                  key: nextauth-url
+            - name: AUTH_TRUST_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "task-manager.fullname" . }}-secrets
+                  key: auth-trust-host
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+```
+
+**Key sections:**
+- `replicas` — How many pod copies to run (from `values.yaml`)
+- `image` — Container image reference using template variables
+- `env` — Environment variables pulled from the Secret resource
+- `livenessProbe` — Restarts the pod if it becomes unresponsive (checks after 30s, every 10s)
+- `readinessProbe` — Removes pod from Service load balancer if not ready (checks after 5s, every 5s)
+- `resources` — CPU/memory limits and requests to prevent resource starvation
+
+### Service Template
+
+```yaml
+# task-manager/helm-chart/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "task-manager.fullname" . }}
+  labels:
+    {{- include "task-manager.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "task-manager.selectorLabels" . | nindent 4 }}
+```
+
+**How it works:**
+- `type: ClusterIP` — Internal cluster IP only (not exposed to internet)
+- `port: 3000` — Service port
+- `targetPort: http` — Maps to the named container port in the Deployment
+- `selector` — Routes traffic to pods matching these labels
+
+### Ingress Template
+
+```yaml
+# task-manager/helm-chart/templates/ingress.yaml
+{{- if .Values.ingress.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "task-manager.fullname" . }}
+  labels:
+    {{- include "task-manager.labels" . | nindent 4 }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  rules:
+    {{- range .Values.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "task-manager.fullname" $ }}
+                port:
+                  number: {{ $.Values.service.port }}
+          {{- end }}
+    {{- end }}
+{{- end }}
+```
+
+**How it works:**
+- `ingressClassName: nginx` — Uses the NGINX Ingress Controller
+- `host: task-manager.local` — Routes requests for this domain
+- `path: /` with `Prefix` — Matches all paths under `/`
+- `backend` — Forwards to the Service on port 3000
+- Conditional rendering: only created when `ingress.enabled: true`
+
+### Secret Template
+
+```yaml
+# task-manager/helm-chart/templates/secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "task-manager.fullname" . }}-secrets
+  labels:
+    {{- include "task-manager.labels" . | nindent 4 }}
+type: Opaque
+data:
+  database-url: {{ .Values.secrets.databaseUrl | b64enc | quote }}
+  nextauth-secret: {{ .Values.secrets.nextauthSecret | b64enc | quote }}
+  nextauth-url: {{ .Values.secrets.nextauthUrl | b64enc | quote }}
+  auth-trust-host: {{ .Values.secrets.authTrustHost | b64enc | quote }}
+```
+
+**Important:**
+- `type: Opaque` — Generic secret type for arbitrary key-value pairs
+- `b64enc` — Helm pipe function that base64-encodes values (K8s Secrets require base64)
+- Values are passed via `--set` at install time and never stored in the chart
+
+---
+
+## Minikube for Local Development
+
+### What is Minikube?
+
+Minikube is a tool that runs a single-node Kubernetes cluster on your local machine. It's perfect for learning and testing Kubernetes deployments without needing a cloud provider.
+
+### Setup Commands
+
+```bash
+# Start Minikube with Docker driver
+minikube start --driver=docker
+
+# Enable NGINX Ingress controller (required for Ingress resources)
+minikube addons enable ingress
+
+# Check Minikube status
+minikube status
+
+# Get Minikube IP (internal cluster IP)
+minikube ip
+
+# Stop Minikube (preserves cluster state)
+minikube stop
+
+# Delete cluster entirely
+minikube delete
+```
+
+### Building Images for Minikube
+
+Minikube runs its own Docker daemon. Your local Docker images are NOT visible inside Minikube. You have two options:
+
+**Option 1: Build directly inside Minikube (recommended)**
+```bash
+minikube image build -t ralf090102/task-manager-app:latest -f Dockerfile D:\GitHub\Task-Manager-Web-Application\task-manager
+```
+
+**Option 2: Load a pre-built image**
+```bash
+# Build with local Docker first
+docker build -t ralf090102/task-manager-app:latest ./task-manager
+
+# Load into Minikube
+minikube image load ralf090102/task-manager-app:latest
+```
+
+When using either option, set `image.pullPolicy: Never` so Kubernetes uses the local image instead of trying to pull from Docker Hub.
+
+### minikube tunnel
+
+On Windows with Docker driver, the Minikube internal IP (e.g., `192.168.49.2`) is NOT directly reachable from the host. `minikube tunnel` creates a network route that maps Ingress resources to `127.0.0.1`:
+
+```bash
+# Run in a separate terminal (blocks foreground)
+minikube tunnel
+
+# Then access via hosts file entry: 127.0.0.1 task-manager.local
+```
+
+The tunnel must stay running for the app to be accessible. If you close it, the app becomes unreachable until you restart it.
+
+---
+
+## Deploying with Helm
+
+### Full Deployment Workflow
+
+```bash
+# 1. Start Minikube
+minikube start --driver=docker
+
+# 2. Enable NGINX Ingress controller
+minikube addons enable ingress
+
+# 3. Build image inside Minikube
+minikube image build -t ralf090102/task-manager-app:latest -f Dockerfile D:\GitHub\Task-Manager-Web-Application\task-manager
+
+# 4. Install the Helm chart
+helm install task-manager ./task-manager/helm-chart \
+  --namespace task-manager \
+  --create-namespace \
+  --set secrets.databaseUrl="postgresql://postgres:postgres@host.docker.internal:5432/taskmanager" \
+  --set secrets.nextauthSecret="local-dev-secret-change-in-production" \
+  --set secrets.nextauthUrl="http://task-manager.local" \
+  --set image.pullPolicy=Never
+
+# 5. Verify deployment
+kubectl get pods -n task-manager
+kubectl get ingress -n task-manager
+
+# 6. Add hosts file entry (requires admin)
+# Add to C:\Windows\System32\drivers\etc\hosts:
+#   127.0.0.1 task-manager.local
+
+# 7. Start tunnel (in separate terminal)
+minikube tunnel
+
+# 8. Access the app
+# Open http://task-manager.local in browser
+```
+
+### Updating the Deployment
+
+```bash
+# After making code changes:
+
+# 1. Rebuild the image
+minikube image build -t ralf090102/task-manager-app:latest -f Dockerfile D:\GitHub\Task-Manager-Web-Application\task-manager
+
+# 2. Restart the deployment to pick up new image
+kubectl rollout restart deployment/task-manager -n task-manager
+
+# Or upgrade with Helm (if values changed)
+helm upgrade task-manager ./task-manager/helm-chart --namespace task-manager --reuse-values
+```
+
+### Useful kubectl Commands
+
+```bash
+# View all resources
+kubectl get all -n task-manager
+
+# View pods with wide output
+kubectl get pods -n task-manager -o wide
+
+# View pod details and events
+kubectl describe pod <pod-name> -n task-manager
+
+# View application logs
+kubectl logs -n task-manager deployment/task-manager --tail=20
+kubectl logs -n task-manager deployment/task-manager -f    # Follow/stream
+
+# View secrets (base64 encoded)
+kubectl get secrets -n task-manager
+kubectl describe secret task-manager-secrets -n task-manager
+
+# View ingress details
+kubectl describe ingress -n task-manager
+
+# Port-forward for direct pod access (bypasses Ingress)
+kubectl port-forward -n task-manager deployment/task-manager 3000:3000
+# Then access http://localhost:3000
+
+# Delete and recreate a pod
+kubectl delete pod <pod-name> -n task-manager
+
+# Scale replicas
+kubectl scale deployment task-manager --replicas=3 -n task-manager
+```
+
+---
+
+## Health Checks and Probes
+
+### Kubernetes Probe Types
+
+Your deployment defines two probe types:
+
+**Liveness Probe** — Is the app running?
+```yaml
+livenessProbe:
+  httpGet:
+    path: /
+    port: http
+  initialDelaySeconds: 30    # Wait 30s before first check
+  periodSeconds: 10           # Check every 10s
+```
+If the liveness probe fails, Kubernetes **kills and restarts** the pod. The 30s delay gives Next.js time to start.
+
+**Readiness Probe** — Is the app ready to serve traffic?
+```yaml
+readinessProbe:
+  httpGet:
+    path: /
+    port: http
+  initialDelaySeconds: 5     # Wait 5s before first check
+  periodSeconds: 5            # Check every 5s
+```
+If the readiness probe fails, Kubernetes **removes the pod from the Service** (stops sending traffic) but does NOT restart it.
+
+### Why Two Probes?
+
+- **Readiness**: App is starting but not ready yet → stop traffic, don't restart
+- **Liveness**: App is completely stuck/crashed → restart it
+
+This prevents unnecessary restarts during normal startup while still recovering from real failures.
+
+---
+
+## Resource Limits
+
+### Why Limit Resources?
+
+In a shared Kubernetes cluster, pods compete for CPU and memory. Without limits, one pod could consume all resources and starve others.
+
+### Your Configuration
+
+```yaml
+resources:
+  limits:
+    cpu: 500m        # Max 0.5 CPU cores
+    memory: 512Mi    # Max 512 MB RAM
+  requests:
+    cpu: 250m        # Guaranteed 0.25 CPU cores
+    memory: 256Mi    # Guaranteed 256 MB RAM
+```
+
+**Requests vs Limits:**
+- `requests` — What Kubernetes guarantees. Used for scheduling decisions.
+- `limits` — Maximum the container can use. Exceeded → CPU is throttled, memory causes OOM kill.
+
+**Units:**
+- `500m` = 500 millicores = 0.5 CPU cores
+- `512Mi` = 512 mebibytes (~537 MB)
+
+---
+
+## Kubernetes Networking Flow
+
+### How Traffic Reaches Your App
+
+```
+Browser
+  → http://task-manager.local
+    → Hosts file: 127.0.0.1
+      → minikube tunnel (routes to cluster)
+        → NGINX Ingress Controller
+          → Rule: host=task-manager.local, path=/
+            → Service: task-manager (ClusterIP:3000)
+              → Pod: task-manager-xxx (port 3000)
+                → Next.js app
+```
+
+### Component Roles
+
+| Component | Role |
+|-----------|------|
+| **Hosts file** | Maps `task-manager.local` to `127.0.0.1` |
+| **minikube tunnel** | Routes `127.0.0.1` traffic into the Minikube cluster |
+| **Ingress** | Routes HTTP traffic by host/path to the correct Service |
+| **Service** | Stable IP/DNS that load-balances across Pods |
+| **Pod** | Runs the actual container (your Next.js app) |
+
+---
+
+## Troubleshooting Kubernetes Deployment
+
+### Issue 1: minikube image build Cannot Find Dockerfile
+
+**Error:**
+```
+ERROR: failed to build: failed to solve: failed to read dockerfile: open Dockerfile: no such file or directory
+```
+
+**Cause:** The `minikube image build` command needs the build context directory AND the Dockerfile to be specified correctly. Running from the wrong directory or without specifying the Dockerfile path fails.
+
+**Solution:**
+```bash
+# WRONG — running from repo root without context:
+minikube image build -t ralf090102/task-manager-app:latest ./task-manager
+
+# WRONG — running from task-manager dir without -f flag:
+minikube image build -t ralf090102/task-manager-app:latest .
+
+# CORRECT — specify both -f Dockerfile AND the build context path:
+minikube image build -t ralf090102/task-manager-app:latest -f Dockerfile D:\GitHub\Task-Manager-Web-Application\task-manager
+```
+
+**Lesson:** `minikube image build` needs the Dockerfile path (`-f`) AND the build context directory as the last argument. These are two separate parameters.
+
+---
+
+### Issue 2: Hosts File Requires Admin Privileges
+
+**Error:**
+```
+Access is denied.
+```
+
+**Cause:** The Windows hosts file (`C:\Windows\System32\drivers\etc\hosts`) is a protected system file. Modifying it requires elevated (administrator) privileges.
+
+**Solution:**
+```powershell
+# Use Start-Process with -Verb RunAs to elevate:
+Start-Process powershell -Verb RunAs -ArgumentList '-Command', 'Add-Content -Path C:\Windows\System32\drivers\etc\hosts -Value "127.0.0.1 task-manager.local"'
+```
+
+Or manually:
+1. Open Notepad as Administrator (right-click → Run as administrator)
+2. File → Open → `C:\Windows\System32\drivers\etc\hosts`
+3. Add `127.0.0.1 task-manager.local` at the bottom
+4. Save
+
+**Verify:**
+```powershell
+Get-Content C:\Windows\System32\drivers\etc\hosts | Select-String "task-manager"
+```
+
+---
+
+### Issue 3: App Unreachable at Minikube Internal IP (192.168.49.2)
+
+**Error:**
+```
+Invoke-WebRequest : The operation has timed out.
+```
+
+**Cause:** On Windows with the Docker driver, Minikube's internal IP (`192.168.49.2`) is NOT directly reachable from the host. This is a known limitation — the Docker VM network is isolated from the Windows host.
+
+**Solution:** Use `minikube tunnel` instead of the internal IP:
+
+```powershell
+# Start tunnel in a background window
+Start-Process powershell -ArgumentList '-Command', 'minikube tunnel'
+
+# Update hosts file to use 127.0.0.1 (where tunnel routes traffic)
+Start-Process powershell -Verb RunAs -ArgumentList '-Command', '(Get-Content C:\Windows\System32\drivers\etc\hosts) -replace ''192.168.49.2 task-manager.local'', ''127.0.0.1 task-manager.local'' | Set-Content C:\Windows\System32\drivers\etc\hosts'
+```
+
+**Lesson:** On Linux, `minikube ip` returns a reachable address. On Windows/macOS with Docker driver, you MUST use `minikube tunnel` to access Ingress resources. The tunnel maps the Ingress load balancer to `127.0.0.1`.
+
+---
+
+### Issue 4: Pod Stuck in ImagePullBackOff
+
+**Error:**
+```
+NAME                            READY   STATUS             RESTARTS   AGE
+task-manager-xxx                0/1     ImagePullBackOff   0          30s
+```
+
+**Cause:** Kubernetes is trying to pull the image from Docker Hub, but either the image doesn't exist there, or you want to use the locally-built Minikube image.
+
+**Solution:**
+```bash
+# Option 1: Set pullPolicy to Never at install time
+helm install task-manager ./helm-chart --set image.pullPolicy=Never ...
+
+# Option 2: Update values.yaml
+image:
+  pullPolicy: Never    # Use local image, never pull
+
+# Then verify the image exists in Minikube:
+minikube image ls | grep task-manager
+```
+
+**Lesson:** `image.pullPolicy: Never` tells Kubernetes to only use images that already exist on the node. This is essential for local Minikube development where you build images directly inside Minikube's Docker daemon.
+
+---
+
+### Issue 5: Pod Crashes with Database Connection Error
+
+**Error (in pod logs):**
+```
+Can't reach database server at `localhost:5432`
+```
+
+**Cause:** The DATABASE_URL is pointing to `localhost` inside the container, but the database isn't running in the same pod. For Supabase, use the external connection URL.
+
+**Solution:**
+```bash
+# Use the correct Supabase connection string:
+helm install task-manager ./helm-chart \
+  --set secrets.databaseUrl="postgresql://postgres:[PASSWORD]@db.[PROJECT-REF].supabase.co:5432/postgres"
+
+# Or for Docker Compose PostgreSQL:
+# Use host.docker.internal to reach host from container
+--set secrets.databaseUrl="postgresql://postgres:postgres@host.docker.internal:5432/taskmanager"
+```
+
+**Lesson:** `localhost` inside a Kubernetes pod refers to the pod itself, NOT the host machine. Use the external database URL or `host.docker.internal` to reach services outside the cluster.
+
+---
+
+### Issue 6: Helm Release Name Conflicts
+
+**Error:**
+```
+Error: INSTALLATION FAILED: cannot re-use a name that is still in use
+```
+
+**Cause:** A Helm release with the same name already exists in the namespace.
+
+**Solution:**
+```bash
+# Check existing releases:
+helm list -n task-manager
+
+# Option 1: Upgrade the existing release
+helm upgrade task-manager ./helm-chart --namespace task-manager --reuse-values
+
+# Option 2: Uninstall first, then reinstall
+helm uninstall task-manager --namespace task-manager
+helm install task-manager ./helm-chart --namespace task-manager ...
+
+# Option 3: Use a different release name
+helm install task-manager-v2 ./helm-chart --namespace task-manager ...
+```
+
+---
+
+## What You've Learned in Phase 4
+
+### Technologies Mastered:
+- ✅ Kubernetes core concepts (Pods, Deployments, Services, Ingress, Secrets)
+- ✅ Helm chart development and templating
+- ✅ Minikube for local Kubernetes development
+- ✅ NGINX Ingress Controller setup
+- ✅ kubectl CLI for cluster management
+- ✅ Container probes (liveness and readiness)
+- ✅ Resource limits and requests
+
+### Core Concepts:
+- ✅ Container orchestration vs single-container deployment
+- ✅ Declarative infrastructure with YAML templates
+- ✅ Service discovery and load balancing
+- ✅ Secret management with Kubernetes Secrets
+- ✅ Health checking and self-healing
+- ✅ Network routing from browser to pod
+- ✅ Helm values and template rendering
+
+### Best Practices:
+- ✅ Resource limits to prevent resource starvation
+- ✅ Both liveness and readiness probes
+- ✅ Base64-encoded Secrets (never plaintext in templates)
+- ✅ `image.pullPolicy: Never` for local Minikube dev
+- ✅ Standard Kubernetes labels for resource tracking
+- ✅ Reusable template helpers in `_helpers.tpl`
+- ✅ Separate namespaces for application isolation
+
+### Troubleshooting Skills:
+- ✅ Diagnosing Minikube networking issues (tunnel vs internal IP)
+- ✅ Fixing ImagePullBackOff with pullPolicy configuration
+- ✅ Building images inside Minikube's Docker daemon
+- ✅ Debugging with `kubectl logs`, `kubectl describe`, `kubectl get`
+- ✅ Managing Helm releases (install, upgrade, uninstall)
+- ✅ Windows-specific issues (hosts file permissions, Docker network isolation)
+
+---
+
+## Next Steps: Phase 5
+
+In Phase 5, you'll learn:
+- Monitoring with Prometheus and Grafana
+- Log aggregation
+- Alerting rules and notification channels
+- Application performance monitoring
+
+This will give you visibility into your application's health and performance in production.
 
 ---
 
@@ -2408,14 +3185,19 @@ This will orchestrate your containerized application at scale.
 - [Docker Compose File Reference](https://docs.docker.com/compose/compose-file/)
 - [BuildKit Documentation](https://github.com/moby/buildkit)
 
-## Resources for Further Learning
-
 ### CI/CD & GitHub Actions
 - [GitHub Actions Documentation](https://docs.github.com/en/actions)
 - [GitHub Actions Workflow Syntax](https://docs.github.com/en/actions/reference/workflow-syntax-for-github-actions)
 - [Trivy Vulnerability Scanner](https://trivy.dev/)
 - [Docker Hub](https://hub.docker.com/)
 
+### Kubernetes & Helm
+- [Kubernetes Documentation](https://kubernetes.io/docs/)
+- [Helm Documentation](https://helm.sh/docs/)
+- [Minikube Documentation](https://minikube.sigs.k8s.io/docs/)
+- [NGINX Ingress Controller](https://kubernetes.github.io/ingress-nginx/)
+- [kubectl Cheat Sheet](https://kubernetes.io/docs/reference/kubectl/cheatsheet/)
+
 ---
 
-**Remember**: The best way to learn is to build. You've successfully built a fully functional task manager with authentication, containerized it, and set up automated CI/CD pipelines. This foundation will serve you well as you move into Kubernetes orchestration in Phase 4!
+**Remember**: The best way to learn is to build. You've successfully built a fully functional task manager with authentication, containerized it, set up automated CI/CD pipelines, and deployed it to Kubernetes with Helm. This foundation will serve you well as you move into monitoring and observability in Phase 5!
