@@ -3,6 +3,7 @@ import { auth } from "@/lib/auth";
 import prisma from "@/lib/prisma";
 import { taskUpdateSchema } from "@/lib/validations";
 import { observeRequest, trackTaskOperation } from "@/lib/metrics";
+import logger from "@/lib/logger";
 
 export async function GET(
   _req: Request,
@@ -76,10 +77,12 @@ export async function PUT(
     });
 
     trackTaskOperation("update", "success");
+    logger.info({ taskId: id, userId: session.user.id }, "Task updated");
     observeRequest("PUT", "/api/tasks/:id", 200, (Date.now() - start) / 1000);
     return NextResponse.json(task);
-  } catch {
+  } catch (err) {
     trackTaskOperation("update", "error");
+    logger.error({ err, taskId: req.url }, "Failed to update task");
     observeRequest("PUT", "/api/tasks/:id", 500, (Date.now() - start) / 1000);
     return NextResponse.json(
       { error: "Internal server error" },
@@ -113,10 +116,12 @@ export async function DELETE(
     await prisma.task.delete({ where: { id } });
 
     trackTaskOperation("delete", "success");
+    logger.info({ taskId: id, userId: session.user.id }, "Task deleted");
     observeRequest("DELETE", "/api/tasks/:id", 200, (Date.now() - start) / 1000);
     return NextResponse.json({ success: true });
-  } catch {
+  } catch (err) {
     trackTaskOperation("delete", "error");
+    logger.error({ err }, "Failed to delete task");
     observeRequest("DELETE", "/api/tasks/:id", 500, (Date.now() - start) / 1000);
     return NextResponse.json(
       { error: "Internal server error" },

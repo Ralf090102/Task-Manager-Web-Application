@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import bcrypt from "bcryptjs";
 import { registerSchema } from "@/lib/validations";
+import logger from "@/lib/logger";
 
 export async function POST(req: Request) {
   try {
@@ -32,8 +33,10 @@ export async function POST(req: Request) {
       select: { id: true, name: true, email: true },
     });
 
+    logger.info({ userId: user.id, email: user.email }, "User registered");
     return NextResponse.json(user, { status: 201 });
-  } catch {
+  } catch (err) {
+    logger.error({ err }, "Registration failed");
     return NextResponse.json(
       { error: "Internal server error" },
       { status: 500 }
