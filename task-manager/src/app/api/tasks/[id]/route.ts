@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import prisma from "@/lib/prisma";
 import { taskUpdateSchema } from "@/lib/validations";
+import { observeRequest, trackTaskOperation } from "@/lib/metrics";
 
 export async function GET(
   _req: Request,
@@ -35,9 +36,11 @@ export async function PUT(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const start = Date.now();
   try {
     const session = await auth();
     if (!session?.user?.id) {
+      observeRequest("PUT", "/api/tasks/:id", 401, (Date.now() - start) / 1000);
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -46,6 +49,7 @@ export async function PUT(
     const parsed = taskUpdateSchema.safeParse(body);
 
     if (!parsed.success) {
+      observeRequest("PUT", "/api/tasks/:id", 400, (Date.now() - start) / 1000);
       return NextResponse.json(
         { error: "Validation failed", details: parsed.error.issues },
         { status: 400 }
@@ -57,6 +61,7 @@ export async function PUT(
     });
 
     if (!existing) {
+      observeRequest("PUT", "/api/tasks/:id", 404, (Date.now() - start) / 1000);
       return NextResponse.json({ error: "Task not found" }, { status: 404 });
     }
 
@@ -70,8 +75,12 @@ export async function PUT(
       },
     });
 
+    trackTaskOperation("update", "success");
+    observeRequest("PUT", "/api/tasks/:id", 200, (Date.now() - start) / 1000);
     return NextResponse.json(task);
   } catch {
+    trackTaskOperation("update", "error");
+    observeRequest("PUT", "/api/tasks/:id", 500, (Date.now() - start) / 1000);
     return NextResponse.json(
       { error: "Internal server error" },
       { status: 500 }
@@ -83,9 +92,11 @@ export async function DELETE(
   _req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const start = Date.now();
   try {
     const session = await auth();
     if (!session?.user?.id) {
+      observeRequest("DELETE", "/api/tasks/:id", 401, (Date.now() - start) / 1000);
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -95,13 +106,18 @@ export async function DELETE(
     });
 
     if (!existing) {
+      observeRequest("DELETE", "/api/tasks/:id", 404, (Date.now() - start) / 1000);
       return NextResponse.json({ error: "Task not found" }, { status: 404 });
     }
 
     await prisma.task.delete({ where: { id } });
 
+    trackTaskOperation("delete", "success");
+    observeRequest("DELETE", "/api/tasks/:id", 200, (Date.now() - start) / 1000);
     return NextResponse.json({ success: true });
   } catch {
+    trackTaskOperation("delete", "error");
+    observeRequest("DELETE", "/api/tasks/:id", 500, (Date.now() - start) / 1000);
     return NextResponse.json(
       { error: "Internal server error" },
       { status: 500 }

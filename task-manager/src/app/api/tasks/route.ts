@@ -2,11 +2,14 @@ import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import prisma from "@/lib/prisma";
 import { taskCreateSchema } from "@/lib/validations";
+import { observeRequest, trackTaskOperation } from "@/lib/metrics";
 
 export async function GET() {
+  const start = Date.now();
   try {
     const session = await auth();
     if (!session?.user?.id) {
+      observeRequest("GET", "/api/tasks", 401, (Date.now() - start) / 1000);
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -15,8 +18,12 @@ export async function GET() {
       orderBy: { createdAt: "desc" },
     });
 
+    trackTaskOperation("list", "success");
+    observeRequest("GET", "/api/tasks", 200, (Date.now() - start) / 1000);
     return NextResponse.json(tasks);
   } catch {
+    trackTaskOperation("list", "error");
+    observeRequest("GET", "/api/tasks", 500, (Date.now() - start) / 1000);
     return NextResponse.json(
       { error: "Internal server error" },
       { status: 500 }
@@ -25,9 +32,11 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
+  const start = Date.now();
   try {
     const session = await auth();
     if (!session?.user?.id) {
+      observeRequest("POST", "/api/tasks", 401, (Date.now() - start) / 1000);
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -35,6 +44,7 @@ export async function POST(req: Request) {
     const parsed = taskCreateSchema.safeParse(body);
 
     if (!parsed.success) {
+      observeRequest("POST", "/api/tasks", 400, (Date.now() - start) / 1000);
       return NextResponse.json(
         { error: "Validation failed", details: parsed.error.issues },
         { status: 400 }
@@ -54,8 +64,12 @@ export async function POST(req: Request) {
       },
     });
 
+    trackTaskOperation("create", "success");
+    observeRequest("POST", "/api/tasks", 201, (Date.now() - start) / 1000);
     return NextResponse.json(task, { status: 201 });
   } catch {
+    trackTaskOperation("create", "error");
+    observeRequest("POST", "/api/tasks", 500, (Date.now() - start) / 1000);
     return NextResponse.json(
       { error: "Internal server error" },
       { status: 500 }
