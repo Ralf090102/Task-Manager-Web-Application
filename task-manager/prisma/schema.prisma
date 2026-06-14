@@ -26,9 +26,10 @@ model User {
   emailVerified DateTime?
   image         String?
   password      String?
-  accounts      Account[]
-  sessions      Session[]
-  tasks         Task[]
+  accounts       Account[]
+  sessions       Session[]
+  tasks          Task[]
+  recurringTasks RecurringTask[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -93,4 +94,23 @@ model Task {
   @@index([status])
   @@index([createdAt])
   @@index([dueDate])
+}
+
+model RecurringTask {
+  id          String       @id @default(cuid())
+  userId      String
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title       String
+  description String?
+  priority    TaskPriority @default(MEDIUM)
+  cron        String
+  nextRun     DateTime
+  lastRun     DateTime?
+  active      Boolean      @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([active, nextRun])
 }
