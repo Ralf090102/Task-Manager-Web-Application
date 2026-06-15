@@ -32,6 +32,23 @@ resources:
     cpu: 250m
     memory: 256Mi
 
+scheduler:
+  enabled: true
+  schedule: "*/5 * * * *"
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  image:
+    repository: ralf090102/scheduler-service
+    pullPolicy: IfNotPresent
+    tag: latest
+  resources:
+    limits:
+      cpu: 250m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
 monitoring:
   enabled: true
   serviceMonitor:
