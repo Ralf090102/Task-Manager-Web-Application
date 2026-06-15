@@ -27,7 +27,24 @@ export const taskUpdateSchema = z.object({
   dueDate: z.string().nullable().optional(),
 });
 
+export const recurringTaskCreateSchema = z.object({
+  title: z.string().min(1, "Title is required").max(200),
+  description: z.string().max(1000).optional(),
+  priority: z.enum(["LOW", "MEDIUM", "HIGH"]).optional(),
+  cron: z.string().min(1, "Cron expression is required"),
+});
+
+export const recurringTaskUpdateSchema = z.object({
+  title: z.string().min(1, "Title is required").max(200).optional(),
+  description: z.string().max(1000).optional(),
+  priority: z.enum(["LOW", "MEDIUM", "HIGH"]).optional(),
+  cron: z.string().min(1).optional(),
+  active: z.boolean().optional(),
+});
+
 export type LoginInput = z.infer<typeof loginSchema>;
 export type RegisterInput = z.infer<typeof registerSchema>;
 export type TaskCreateInput = z.infer<typeof taskCreateSchema>;
 export type TaskUpdateInput = z.infer<typeof taskUpdateSchema>;
+export type RecurringTaskCreateInput = z.infer<typeof recurringTaskCreateSchema>;
+export type RecurringTaskUpdateInput = z.infer<typeof recurringTaskUpdateSchema>;
