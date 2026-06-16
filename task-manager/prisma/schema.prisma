@@ -30,6 +30,7 @@ model User {
   sessions       Session[]
   tasks          Task[]
   recurringTasks RecurringTask[]
+  notifications  Notification[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -113,4 +114,17 @@ model RecurringTask {
 
   @@index([userId])
   @@index([active, nextRun])
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String
+  message   String
+  read      Boolean  @default(false)
+  taskId    String?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
 }
