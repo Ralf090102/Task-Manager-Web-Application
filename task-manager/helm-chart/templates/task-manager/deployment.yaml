@@ -13,6 +13,7 @@ spec:
     metadata:
       labels:
         {{- include "task-manager.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: app
     spec:
       containers:
         - name: {{ .Chart.Name }}
