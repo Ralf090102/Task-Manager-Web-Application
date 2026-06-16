@@ -1,0 +1,18 @@
+{{- if .Values.notification.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "task-manager.fullname" . }}-notification
+  labels:
+    {{- include "task-manager.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: 3004
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "task-manager.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: notification
+{{- end }}
