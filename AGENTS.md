@@ -12,6 +12,8 @@ Working directory is `task-manager/`. Root contains only documentation.
 - `src/components/` - React components, tests in `__tests__/` subdirectory
 - `src/lib/` - Auth, Prisma client, and validation schemas
 - `src/generated/prisma/` - Prisma client (generated, gitignored)
+- `services/` - Microservices (scheduler, notification, etc.)
+- `scripts/` - Cluster setup automation (`setup-cluster.sh`, `setup-cluster.ps1`)
 
 ## Essential Commands
 
@@ -42,7 +44,7 @@ npm run db:studio      # Open Prisma Studio
 - Database: PostgreSQL with `@prisma/adapter-pg` adapter
 - Custom client output: `src/generated/prisma` (NOT default node_modules/.prisma)
 - Client initialized with custom adapter in `src/lib/prisma.ts`
-- Global singleton pattern for development hot-reload
+- `exclude: ["node_modules", "services"]` in main `tsconfig.json` — services have their own tsconfig
 
 ## Tailwind CSS v4
 
@@ -171,3 +173,62 @@ Uses Tailwind v4 with new `@import "tailwindcss"` syntax in `globals.css`. Do NO
     --set monitoring.serviceMonitor.scrapeInterval=15s \
     --set monitoring.serviceMonitor.labels.release=monitoring
   ```
+
+## Microservices Expansion — Stage 2
+
+### Overview
+
+Expanding the monolith into a microservices architecture. 8 planned modules across 4 phases. Module 7 (Scheduler) is implemented.
+
+### Module 7: Recurring Task Scheduler (Phase 1)
+
+- **Service**: `services/scheduler/` — Node.js CronJob microservice
+- **Purpose**: Creates tasks from recurring templates on a cron schedule
+- **Runtime**: `tsx` (NOT `tsc + node`) — required because Prisma 7.8 generates `.ts` files with `import.meta.url` (ESM syntax incompatible with CJS compilation)
+- **Schema sharing**: Copies `prisma/schema.prisma` during Docker build, runs `npx prisma generate` fresh — no committed generated files
+- **API endpoints** (main app):
+  - `GET/POST /api/recurring` — list/create recurring tasks
+  - `PATCH/DELETE /api/recurring/[id]` — update/delete
+  - Validates cron expressions via `cron-parser`
+- **Helm template**: `templates/scheduler/cronjob.yaml` — CronJob with `concurrencyPolicy: Forbid`
+- **values.yaml**: `scheduler:` section with `enabled`, `schedule`, `image`, `resources`
+- **Build context**: `task-manager/` (not `services/scheduler/`) — needed to access shared `prisma/schema.prisma`
+- **Image**: `ralf090102/scheduler-service:latest`
+- **Deploy commands**:
+  ```bash
+  # Build scheduler image (from task-manager/)
+  minikube image build -t ralf090102/scheduler-service:latest -f services/scheduler/Dockerfile .
+
+  # Helm upgrade (reuse existing secrets)
+  helm upgrade task-manager ./task-manager/helm-chart --namespace task-manager \
+    --reuse-values --set scheduler.image.pullPolicy=Never
+
+  # Trigger manual run
+  kubectl create job --from=cronjob/task-manager-scheduler -n task-manager manual-test-1
+  kubectl logs -n task-manager job/manual-test-1
+  ```
+
+### Microservice Pattern (reusable for future services)
+
+Each Node.js microservice follows this structure:
+```
+services/<name>/
+├── package.json          # "type": "module", tsx as dependency
+├── tsconfig.json         # moduleResolution: "bundler", noEmit: true
+├── prisma.config.ts      # Minimal config pointing to shared schema
+├── src/index.ts          # imports from ./generated/prisma/client.ts
+├── Dockerfile            # copies shared schema, runs prisma generate, uses tsx
+└── .gitignore
+```
+
+### Helm Chart Structure (multi-service)
+
+```
+helm-chart/templates/
+├── _helpers.tpl              # Shared helpers
+├── secret.yaml               # Shared secrets
+├── task-manager/             # Main app (deployment, service, ingress, servicemonitor)
+└── scheduler/                # Scheduler (cronjob)
+```
+
+Each service has an `enabled` flag in `values.yaml` for conditional rendering.
