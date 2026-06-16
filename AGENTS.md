@@ -178,7 +178,7 @@ Uses Tailwind v4 with new `@import "tailwindcss"` syntax in `globals.css`. Do NO
 
 ### Overview
 
-Expanding the monolith into a microservices architecture. 8 planned modules across 4 phases. Module 7 (Scheduler) is implemented.
+Expanding the monolith into a microservices architecture. 8 planned modules across 4 phases. Module 7 (Scheduler) and Module 1 (Notification) are implemented.
 
 ### Module 7: Recurring Task Scheduler (Phase 1)
 
@@ -208,6 +208,60 @@ Expanding the monolith into a microservices architecture. 8 planned modules acro
   kubectl logs -n task-manager job/manual-test-1
   ```
 
+### Module 1: Notification Service (Phase 1)
+
+- **Service**: `services/notification/` — Node.js Fastify HTTP microservice
+- **Purpose**: Sends email (nodemailer) and in-app notifications for due-soon and completed tasks
+- **Runtime**: `tsx` (same pattern as scheduler)
+- **Port**: 3004 (ClusterIP only — no Ingress, internal access only)
+- **Endpoints**: `GET /health`, `POST /notify/due-soon`, `POST /notify/task-completed`
+- **SMTP**: Graceful degradation — if `SMTP_HOST` is empty, emails are skipped but in-app notifications are still created in the database
+- **Schema**: `Notification` model added to `prisma/schema.prisma` (fields: id, userId, type, message, read, taskId, createdAt)
+- **Helm templates**: `templates/notification/` — Deployment, Service (ClusterIP), Secret (SMTP credentials)
+- **values.yaml**: `notification:` section with `enabled`, `image`, `smtp`, `resources`
+- **Image**: `ralf090102/notification-service:latest`
+- **Build context**: `task-manager/` (same as scheduler)
+- **Deploy commands**:
+  ```bash
+  # Build notification image (from task-manager/)
+  minikube image build -t ralf090102/notification-service:latest -f services/notification/Dockerfile .
+
+  # Helm upgrade with notification enabled
+  # NOTE: --reuse-values does NOT read new values.yaml keys!
+  # Must pass ALL notification.* values via --set on first deploy:
+  helm upgrade task-manager ./task-manager/helm-chart --namespace task-manager \
+    --reuse-values \
+    --set notification.enabled=true \
+    --set notification.image.repository=ralf090102/notification-service \
+    --set notification.image.tag=latest \
+    --set notification.image.pullPolicy=Never \
+    --set notification.smtp.host="" \
+    --set notification.smtp.port="587" \
+    --set notification.smtp.from="noreply@taskmanager.local" \
+    --set notification.smtp.user="" \
+    --set notification.smtp.password="" \
+    --set notification.resources.limits.cpu=250m \
+    --set notification.resources.limits.memory=256Mi \
+    --set notification.resources.requests.cpu=100m \
+    --set notification.resources.requests.memory=128Mi
+
+  # Subsequent upgrades only need --reuse-values (values are now persisted):
+  helm upgrade task-manager ./task-manager/helm-chart --namespace task-manager --reuse-values
+
+  # Test internal communication (no curl/wget in slim images — use Node.js):
+  kubectl exec deployment/task-manager -n task-manager -- node -e "fetch('http://task-manager-notification:3004/health').then(r=>r.text()).then(t=>console.log(t))"
+  # Expected: {"status":"ok"}
+  ```
+
+### Service Selector Labels (Critical)
+
+The main app Deployment and Service MUST have `app.kubernetes.io/component: app` in their labels/selectors. Without it, the main app Service selector (`app.kubernetes.io/name=task-manager` + `app.kubernetes.io/instance=task-manager`) matches ALL pods with those base labels — including notification pods. This causes traffic to be load-balanced across both pods (Fastify returns 404 for Next.js routes like `/dashboard`).
+
+**Rule**: Every service's Deployment pod template and Service selector must include a unique `app.kubernetes.io/component` label:
+- Main app: `app.kubernetes.io/component: app`
+- Notification: `app.kubernetes.io/component: notification`
+- Scheduler: N/A (CronJob, no Service)
+
 ### Microservice Pattern (reusable for future services)
 
 Each Node.js microservice follows this structure:
@@ -228,7 +282,8 @@ helm-chart/templates/
 ├── _helpers.tpl              # Shared helpers
 ├── secret.yaml               # Shared secrets
 ├── task-manager/             # Main app (deployment, service, ingress, servicemonitor)
-└── scheduler/                # Scheduler (cronjob)
+├── scheduler/                # Scheduler (cronjob)
+└── notification/             # Notification (deployment, service, secret)
 ```
 
 Each service has an `enabled` flag in `values.yaml` for conditional rendering.

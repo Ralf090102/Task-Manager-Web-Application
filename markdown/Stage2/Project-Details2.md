@@ -1,6 +1,6 @@
 # Stage 2 - Phase 1 Learning Summary
 
-This document explains the core concepts and technologies implemented in Phase 1 of the Task Manager microservices expansion (Module 7: Recurring Task Scheduler). Each section includes real examples from your codebase.
+This document explains the core concepts and technologies implemented in Phase 1 of the Task Manager microservices expansion. It covers Module 7 (Recurring Task Scheduler) and Module 1 (Notification Service). Each section includes real examples from your codebase.
 
 ---
 
@@ -18,8 +18,17 @@ This document explains the core concepts and technologies implemented in Phase 1
 10. [Docker Build Strategy for Monorepo Services](#docker-build-strategy-for-monorepo-services)
 11. [Cluster Setup Automation](#cluster-setup-automation)
 12. [Module-Level TypeScript Configuration](#module-level-typescript-configuration)
-13. [Key Patterns and Best Practices](#key-patterns-and-best-practices)
-14. [Troubleshooting](#troubleshooting)
+13. [Kubernetes Deployments for Microservices](#kubernetes-deployments-for-microservices)
+14. [Internal Service-to-Service Communication](#internal-service-to-service-communication)
+15. [Kubernetes Secrets for Service Credentials](#kubernetes-secrets-for-service-credentials)
+16. [Health Checks: Liveness and Readiness Probes](#health-checks-liveness-and-readiness-probes)
+17. [Fastify: HTTP Framework for Microservices](#fastify-http-framework-for-microservices)
+18. [nodemailer and Graceful SMTP Degradation](#nodemailer-and-graceful-smtp-degradation)
+19. [The Service Selector Label Bug](#the-service-selector-label-bug)
+20. [The `--reuse-values` Gotcha](#the---reuse-values-gotcha)
+21. [Notification Model Schema Design](#notification-model-schema-design)
+22. [Key Patterns and Best Practices](#key-patterns-and-best-practices)
+23. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -35,7 +44,7 @@ task-manager/
 │   └── schema.prisma              # Shared schema (single source of truth)
 ├── src/                           # Main Next.js app
 ├── services/                      # Microservices directory
-│   ├── notification/              # Module 1 (future)
+│   ├── notification/              # Module 1 (implemented)
 │   ├── file-service/              # Module 2 (future)
 │   ├── analytics/                 # Module 3 (future)
 │   ├── realtime/                  # Module 4 (future)
@@ -806,6 +815,577 @@ Each service has its own `tsconfig.json` with settings appropriate for its modul
 
 ---
 
+## Kubernetes Deployments for Microservices
+
+### From CronJob to Deployment
+
+The scheduler (Module 7) uses a **CronJob** — it runs, does its work, and exits. The notification service (Module 1) is a **long-running HTTP server** — it must stay alive to accept incoming requests at any time. This requires a **Deployment**.
+
+```
+CronJob (scheduler):     Start → Process → Exit → (wait) → Start → Process → Exit ...
+Deployment (notification): Start → Listen on port 3004 → (serve requests forever)
+```
+
+### Deployment Template
+
+```yaml
+# helm-chart/templates/notification/deployment.yaml
+{{- if .Values.notification.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "task-manager.fullname" . }}-notification
+  labels:
+    {{- include "task-manager.labels" . | nindent 4 }}
+    app.kubernetes.io/component: notification
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "task-manager.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: notification
+  template:
+    metadata:
+      labels:
+        {{- include "task-manager.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: notification
+    spec:
+      containers:
+        - name: notification
+          image: "{{ .Values.notification.image.repository }}:{{ .Values.notification.image.tag }}"
+          ports:
+            - name: http
+              containerPort: 3004
+          # ... env, probes, resources
+{{- end }}
+```
+
+### Key Differences from the CronJob
+
+| Aspect | CronJob (Scheduler) | Deployment (Notification) |
+|--------|---------------------|--------------------------|
+| Workload type | `batch/v1/CronJob` | `apps/v1/Deployment` |
+| Lifecycle | Run on schedule, exit | Run continuously |
+| Pod restart | `restartPolicy: OnFailure` | Managed by Deployment (always restart) |
+| Probes | Not applicable | Liveness + Readiness required |
+| Scaling | One pod per trigger | `replicas` field |
+| Service | Not needed (no network) | ClusterIP Service required |
+
+### The `app.kubernetes.io/component` Label
+
+Every Deployment's pod template and Service selector includes a unique component label. This is **critical** — without it, the main app Service selector would match notification pods too (see [The Service Selector Label Bug](#the-service-selector-label-bug)).
+
+---
+
+## Internal Service-to-Service Communication
+
+### ClusterIP Services
+
+A **ClusterIP** Service gives a microservice a stable internal DNS name and IP address. It's only reachable from inside the cluster — no external access.
+
+```
+Main app (Next.js, port 3000)
+    │
+    │  HTTP POST http://task-manager-notification:3004/notify/due-soon
+    │
+    ▼
+Notification Service (ClusterIP, port 3004)
+    │
+    ├──► PostgreSQL (Supabase)
+    └──► SMTP Server (if configured)
+```
+
+### Service Template
+
+```yaml
+# helm-chart/templates/notification/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "task-manager.fullname" . }}-notification
+spec:
+  type: ClusterIP               # Internal only — no Ingress
+  ports:
+    - port: 3004                # Service port (what callers connect to)
+      targetPort: http          # Container port name (resolves to 3004)
+      name: http
+  selector:
+    app.kubernetes.io/name: task-manager
+    app.kubernetes.io/instance: task-manager
+    app.kubernetes.io/component: notification
+```
+
+### DNS Resolution
+
+Kubernetes has a built-in DNS server (CoreDNS). When the main app calls `http://task-manager-notification:3004/health`, CoreDNS resolves the service name to the ClusterIP:
+
+```
+task-manager-notification  →  10.100.79.245  (ClusterIP)
+```
+
+The ClusterIP then load-balances to one of the matching pods.
+
+### Why No Ingress?
+
+The notification service is **internal-only**. Users never access it directly — only the main app (or scheduler) calls it. Adding an Ingress would expose it to the internet, which is unnecessary and insecure.
+
+```
+Browser ──► NGINX Ingress ──► task-manager (port 3000)
+                                   │
+                                   ├──► task-manager-notification (port 3004)  [internal only]
+                                   └──► PostgreSQL [external]
+```
+
+### Testing Internal Communication
+
+Minikube's Docker images are slim (no `curl` or `wget`). Use Node.js's built-in `fetch`:
+
+```bash
+kubectl exec deployment/task-manager -n task-manager -- \
+  node -e "fetch('http://task-manager-notification:3004/health').then(r=>r.text()).then(t=>console.log(t))"
+# Output: {"status":"ok"}
+```
+
+---
+
+## Kubernetes Secrets for Service Credentials
+
+### What Are Secrets?
+
+Kubernetes **Secrets** store sensitive data like passwords, API keys, and SMTP credentials. Unlike ConfigMaps (plaintext), Secrets are base64-encoded and can be restricted via RBAC.
+
+### Notification Service Secrets
+
+The notification service needs two types of credentials:
+1. **DATABASE_URL** — shared with the main app (from `task-manager-secrets`)
+2. **SMTP credentials** — unique to the notification service (from `task-manager-notification-secret`)
+
+### Secret Template
+
+```yaml
+# helm-chart/templates/notification/secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "task-manager.fullname" . }}-notification-secret
+type: Opaque
+data:
+  smtpUser: {{ .Values.notification.smtp.user | b64enc | quote }}
+  smtpPassword: {{ .Values.notification.smtp.password | b64enc | quote }}
+```
+
+The `b64enc` Helm function base64-encodes the values (Kubernetes requires base64 in Secrets).
+
+### Injecting Secrets into Pods
+
+```yaml
+env:
+  - name: DATABASE_URL
+    valueFrom:
+      secretKeyRef:
+        name: task-manager-secrets           # Shared secret
+        key: database-url
+  - name: SMTP_USER
+    valueFrom:
+      secretKeyRef:
+        name: task-manager-notification-secret  # Service-specific secret
+        key: smtpUser
+```
+
+### Shared vs Service-Specific Secrets
+
+| Secret | Used By | Contents |
+|--------|---------|----------|
+| `task-manager-secrets` | Main app, scheduler, notification | `database-url`, `nextauth-secret`, etc. |
+| `task-manager-notification-secret` | Notification only | `smtpUser`, `smtpPassword` |
+
+Shared secrets avoid duplication. Service-specific secrets keep each service's credentials isolated.
+
+---
+
+## Health Checks: Liveness and Readiness Probes
+
+### Why Probes Matter for Long-Running Services
+
+A CronJob runs and exits — if it fails, Kubernetes knows from the exit code. A Deployment runs forever — Kubernetes needs another way to know if the service is healthy.
+
+### Two Types of Probes
+
+**Liveness Probe**: "Is the pod alive?" If this fails, Kubernetes **restarts** the pod.
+
+**Readiness Probe**: "Is the pod ready to serve traffic?" If this fails, Kubernetes **removes the pod from the Service** (stops sending requests to it) but doesn't restart it.
+
+```
+Pod states with probes:
+  Starting → [Readiness fails] → Not in Service load balancer
+           → [Readiness passes] → Receives traffic
+           → [Liveness fails] → Restarted
+```
+
+### Probe Configuration
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /health        # Must return 200
+    port: http           # Port name from container spec
+  initialDelaySeconds: 10  # Wait 10s before first check
+  periodSeconds: 30         # Check every 30s
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 5   # Check sooner (5s)
+  periodSeconds: 10         # Check more frequently (10s)
+```
+
+### The `/health` Endpoint
+
+```typescript
+// services/notification/src/index.ts
+app.get("/health", async () => ({ status: "ok" }));
+```
+
+Fastify returns `{"status":"ok"}` with HTTP 200. This is enough for liveness/readiness — the probe only cares about the HTTP status code.
+
+### Why `initialDelaySeconds` Matters
+
+The service needs time to start (Fastify initialization, Prisma client connection). If the probe starts too early, it fails and Kubernetes might restart the pod in a crash loop:
+
+```
+CrashLoopBackOff:
+  Start → Probe fails (too early) → Restart → Probe fails → Restart → ...
+```
+
+`initialDelaySeconds: 10` gives the service 10 seconds to boot before the first probe.
+
+---
+
+## Fastify: HTTP Framework for Microservices
+
+### What Is Fastify?
+
+**Fastify** is a high-performance Node.js web framework. It's lighter than Express and includes built-in JSON schema validation and structured logging (Pino).
+
+### Why Fastify for Microservices?
+
+| Feature | Express | Fastify |
+|---------|---------|---------|
+| Performance | Good | ~2x faster |
+| Logging | Manual (morgan) | Built-in (Pino, JSON) |
+| Schema validation | Manual (joi/zod) | Built-in (JSON Schema) |
+| Plugin ecosystem | Large | Growing, focused |
+
+### Notification Service with Fastify
+
+```typescript
+import Fastify from "fastify";
+
+const app = Fastify({
+  logger: { level: process.env.LOG_LEVEL || "info" },
+});
+
+app.get("/health", async () => ({ status: "ok" }));
+
+app.post("/notify/due-soon", async () => {
+  // ... query tasks, send emails, create notifications
+  return { notified: tasks.length };
+});
+
+const start = async () => {
+  try {
+    await app.listen({ port: 3004, host: "0.0.0.0" });
+    app.log.info("[notification] Service listening on port 3004");
+  } catch (err) {
+    app.log.error(err);
+    process.exit(1);
+  }
+};
+
+start();
+```
+
+### Structured JSON Logging
+
+Fastify uses Pino by default. Every request is logged as structured JSON:
+
+```json
+{"level":30,"time":1781577018428,"msg":"incoming request","req":{"method":"GET","url":"/health"}}
+{"level":30,"time":1781577018429,"msg":"request completed","res":{"statusCode":200},"responseTime":0.33}
+```
+
+This is machine-parseable — ideal for log aggregation (ELK, Loki, Datadog).
+
+### `host: "0.0.0.0"` Is Critical
+
+```typescript
+await app.listen({ port: 3004, host: "0.0.0.0" });
+```
+
+If you use `localhost` or `127.0.0.1`, the service only accepts connections from itself. In Kubernetes, the Service routes traffic to the pod's IP — which is NOT localhost. `0.0.0.0` binds to all interfaces, allowing Kubernetes to forward traffic to the container.
+
+---
+
+## nodemailer and Graceful SMTP Degradation
+
+### What Is nodemailer?
+
+**nodemailer** is the standard Node.js library for sending emails via SMTP.
+
+### Creating an SMTP Transporter
+
+```typescript
+import nodemailer from "nodemailer";
+
+const transporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST,       // e.g., "smtp.gmail.com"
+  port: parseInt(process.env.SMTP_PORT || "587"),
+  auth: {
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASSWORD,
+  },
+});
+```
+
+### Graceful Degradation: No SMTP, No Problem
+
+In development, SMTP credentials are typically empty. If the service crashes when `SMTP_HOST` is undefined, it can't even create in-app notifications. The solution: make the transporter optional.
+
+```typescript
+const smtpHost = process.env.SMTP_HOST;
+const transporter = smtpHost
+  ? nodemailer.createTransport({ host: smtpHost, /* ... */ })
+  : null;
+
+async function sendEmail(to: string, subject: string, text: string) {
+  if (!transporter) {
+    app.log.info({ to, subject }, "[notification] SMTP not configured, skipping email");
+    return;
+  }
+  // ... send email
+}
+```
+
+This way:
+- **With SMTP**: Sends emails + creates in-app notifications
+- **Without SMTP**: Skips emails + creates in-app notifications (logged for debugging)
+
+The service always works, regardless of SMTP configuration.
+
+---
+
+## The Service Selector Label Bug
+
+### What Happened
+
+After deploying the notification service, accessing `http://task-manager.local/dashboard` returned:
+
+```json
+{"message":"Route GET:/dashboard not found","error":"Not Found","statusCode":404}
+```
+
+This is a **Fastify** error (from the notification service), not a Next.js error. The NGINX Ingress was routing traffic to the notification pod instead of the main app pod.
+
+### Root Cause: Shared Labels
+
+Both pods share the same base labels from `task-manager.selectorLabels`:
+
+```
+app.kubernetes.io/name: task-manager
+app.kubernetes.io/instance: task-manager
+```
+
+The main app Service selector used ONLY these base labels:
+
+```yaml
+# task-manager service selector (BEFORE fix)
+selector:
+  app.kubernetes.io/name: task-manager       # ← matches BOTH pods!
+  app.kubernetes.io/instance: task-manager    # ← matches BOTH pods!
+```
+
+Kubernetes Services route traffic to **any pod** matching the selector. Since the notification pod also had these labels, the Service load-balanced across both pods:
+
+```
+Incoming request → task-manager Service → 50% chance → main app pod (Next.js, port 3000) ✓
+                                          50% chance → notification pod (Fastify, port 3004) ✗
+```
+
+Fastify received requests for `/dashboard` (a Next.js route) and returned 404.
+
+### The Fix: Component Labels
+
+Add a unique `app.kubernetes.io/component` label to each service's pod template AND service selector:
+
+```yaml
+# Main app (AFTER fix)
+selector:
+  app.kubernetes.io/name: task-manager
+  app.kubernetes.io/instance: task-manager
+  app.kubernetes.io/component: app          # ← NEW: only matches main app pods
+
+# Notification service (already correct)
+selector:
+  app.kubernetes.io/name: task-manager
+  app.kubernetes.io/instance: task-manager
+  app.kubernetes.io/component: notification  # ← only matches notification pods
+```
+
+### Verifying the Fix
+
+```bash
+# Check which pods the Service routes to
+kubectl get endpoints task-manager -n task-manager
+# BEFORE fix: 10.244.0.73:3000, 10.244.0.74:3004  (two endpoints!)
+# AFTER fix:  10.244.0.77:3000                     (one endpoint)
+```
+
+### The Rule
+
+**Every service's Deployment pod template and Service selector must include a unique `app.kubernetes.io/component` label.** This prevents label collision when multiple services share base Helm labels.
+
+---
+
+## The `--reuse-values` Gotcha
+
+### What Happened
+
+After adding the `notification:` section to `values.yaml`, running:
+
+```bash
+helm upgrade task-manager ./helm-chart --namespace task-manager \
+  --reuse-values --set notification.enabled=true
+```
+
+Failed with:
+
+```
+Error: nil pointer evaluating interface {}.user
+```
+
+### Root Cause
+
+`--reuse-values` uses the **previous release's values**, NOT the current `values.yaml`. Since the previous release didn't have a `notification:` section, `notification.smtp.user` was nil — causing the template's `b64enc` function to fail.
+
+```
+values.yaml (has notification:)    ← NOT read by --reuse-values
+previous release values           ← Used instead (no notification:)
+```
+
+### The Fix: Pass All New Keys via `--set`
+
+On first deployment of a new service, ALL its values must be passed via `--set`:
+
+```bash
+helm upgrade task-manager ./helm-chart --namespace task-manager \
+  --reuse-values \
+  --set notification.enabled=true \
+  --set notification.image.repository=ralf090102/notification-service \
+  --set notification.image.tag=latest \
+  --set notification.image.pullPolicy=Never \
+  --set notification.smtp.host="" \
+  --set notification.smtp.port="587" \
+  --set notification.smtp.from="noreply@taskmanager.local" \
+  --set notification.smtp.user="" \
+  --set notification.smtp.password="" \
+  --set notification.resources.limits.cpu=250m \
+  --set notification.resources.limits.memory=256Mi \
+  --set notification.resources.requests.cpu=100m \
+  --set notification.resources.requests.memory=128Mi
+```
+
+After the first deploy, the values are **persisted** in the release. Subsequent upgrades only need `--reuse-values`:
+
+```bash
+helm upgrade task-manager ./helm-chart --namespace task-manager --reuse-values
+```
+
+### Alternative: `--reset-values`
+
+`--reset-values` re-reads `values.yaml` from scratch. This picks up new keys automatically, but you must re-pass ALL overrides (secrets, image pull policies):
+
+```bash
+helm upgrade task-manager ./helm-chart --namespace task-manager \
+  --reset-values \
+  --set secrets.databaseUrl=<URL> \
+  --set secrets.nextauthSecret=<SECRET> \
+  --set image.pullPolicy=Never \
+  # ... (all other overrides)
+```
+
+---
+
+## Notification Model Schema Design
+
+### The Notification Model
+
+```prisma
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String   // "due_soon", "task_completed", "task_assigned"
+  message   String
+  read      Boolean  @default(false)
+  taskId    String?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+```
+
+### Field Design Rationale
+
+**`type` (String)**: Stores the notification category. Using a plain String (not an enum) allows adding new types without schema migrations.
+
+**`message` (String)**: Pre-rendered text ready for display. The notification service computes the message at creation time, so the frontend just displays it — no template rendering needed.
+
+**`read` (Boolean)**: Tracks whether the user has seen this notification. Used for badge counts ("3 unread notifications").
+
+**`taskId` (String?)**: Nullable — links to a task if the notification is task-related. Allows the frontend to navigate to the task when the notification is clicked.
+
+### Index Strategy
+
+```prisma
+@@index([userId])
+```
+
+The main query pattern is "get all notifications for user X, newest first":
+
+```sql
+SELECT * FROM "Notification" WHERE "userId" = ? ORDER BY "createdAt" DESC;
+```
+
+The index on `userId` makes this query fast even with millions of notifications.
+
+### Cascade Delete
+
+```prisma
+user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+```
+
+When a user is deleted, all their notifications are automatically cleaned up. No orphaned records.
+
+### Dual Notification Strategy
+
+The notification service creates **two types** of notifications simultaneously:
+
+1. **In-app notification** — a `Notification` record in the database (displayed in the UI)
+2. **Email notification** — sent via SMTP (if configured)
+
+```typescript
+// Both happen in the same endpoint:
+await sendEmail(task.user.email, subject, text);           // Email (optional)
+await prisma.notification.create({                          // In-app (always)
+  data: { userId: task.userId, type: "due_soon", message, taskId: task.id },
+});
+```
+
+This ensures users are always notified in-app, even if email is not configured.
+
+---
+
 ## Key Patterns and Best Practices
 
 ### 1. Microservice Independence
@@ -922,28 +1502,85 @@ For CronJobs, delete old Jobs and let the next schedule trigger create new ones:
 kubectl delete jobs -n task-manager --all
 ```
 
+### Issue 6: `Route GET:/dashboard not found` (Fastify 404)
+
+**Cause**: The main app Service selector matches notification pods too (shared base labels). Traffic is load-balanced across both pods — Fastify returns 404 for Next.js routes.
+
+**Diagnosis**:
+```bash
+# Check how many endpoints the Service has
+kubectl get endpoints task-manager -n task-manager
+# If you see TWO IPs, the selector is too broad
+```
+
+**Solution**: Add a unique `app.kubernetes.io/component` label to each service's Deployment pod template and Service selector. See [The Service Selector Label Bug](#the-service-selector-label-bug).
+
+### Issue 7: `nil pointer evaluating interface {}.user`
+
+**Cause**: `--reuse-values` uses the previous release's values, not the current `values.yaml`. New keys added to `values.yaml` (like `notification.smtp.user`) are nil.
+
+**Solution**: Pass ALL new keys via `--set` on first deploy. See [The `--reuse-values` Gotcha](#the---reuse-values-gotcha).
+
+### Issue 8: `InvalidImageName` on notification pod
+
+**Cause**: Image repository/tag are empty because `--reuse-values` didn't pick up the new `notification.image` values from `values.yaml`.
+
+**Diagnosis**:
+```bash
+kubectl describe pod -l app.kubernetes.io/component=notification -n task-manager | findstr Image
+# Image:  :    ← Both repository and tag are empty
+```
+
+**Solution**: Pass image values via `--set` on first deploy:
+```bash
+--set notification.image.repository=ralf090102/notification-service
+--set notification.image.tag=latest
+```
+
+### Issue 9: Cannot test internal service (no curl/wget)
+
+**Cause**: Slim Docker images (`node:22-slim`) don't include `curl` or `wget`.
+
+**Solution**: Use Node.js's built-in `fetch` API:
+```bash
+kubectl exec deployment/task-manager -n task-manager -- \
+  node -e "fetch('http://task-manager-notification:3004/health').then(r=>r.text()).then(t=>console.log(t))"
+```
+
 ---
 
 ## What You've Learned in Stage 2 - Phase 1
 
 ### Technologies Mastered:
 - Microservices architecture in a monorepo
-- Kubernetes CronJob workload type
+- Kubernetes CronJob workload type (Module 7)
+- Kubernetes Deployment workload type (Module 1)
+- ClusterIP Services for internal communication
+- Kubernetes Secrets for SMTP credentials
+- Health checks: liveness and readiness probes
 - Shared Prisma schema across services
 - `tsx` as a TypeScript runtime (vs `tsc` + `node`)
 - `cron-parser` for schedule computation
+- Fastify HTTP framework with structured logging
+- `nodemailer` for SMTP email delivery
+- Graceful service degradation (optional SMTP)
 - Helm chart multi-service organization
 - Docker builds with shared monorepo context
 - Bash cluster setup automation
 
 ### Core Concepts:
 - CronJob lifecycle (schedule → Job → Pod → exit)
+- Deployment lifecycle (start → serve → restart on failure)
+- ClusterIP DNS resolution for internal services
 - `concurrencyPolicy: Forbid` for data safety
 - ESM vs CommonJS module systems
 - `import.meta.url` and why it breaks `tsc`
 - Conditional Helm template rendering
 - Prisma client generation during Docker build
 - Idempotent deployment scripts
+- Liveness vs Readiness probes
+- Service label selectors and collision risks
+- `--reuse-values` behavior and limitations
 
 ### Best Practices:
 - Single source of truth for database schema
@@ -952,12 +1589,19 @@ kubectl delete jobs -n task-manager --all
 - Clean database disconnection on exit
 - Module-level TypeScript configuration
 - `.dockerignore` to optimize build context
+- Unique `app.kubernetes.io/component` label per service
+- Graceful degradation when external services (SMTP) are unavailable
+- Pre-rendered notification messages for frontend simplicity
+- Dual notification strategy (in-app + email)
 
 ### Troubleshooting Skills:
 - Diagnosing ESM/CJS module conflicts
 - Debugging CronJob pod failures
 - Fixing TypeScript cross-compilation issues
 - Manual CronJob triggering for testing
+- Debugging Service selector label collisions (traffic routing to wrong pod)
+- Testing internal service communication without curl/wget
+- Fixing `--reuse-values` nil pointer errors for new Helm keys
 
 ---
 
