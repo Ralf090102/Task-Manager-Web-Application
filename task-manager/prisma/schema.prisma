@@ -87,6 +87,7 @@ model Task {
   dueDate     DateTime?
   userId      String
   user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  attachments Attachment[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -95,6 +96,19 @@ model Task {
   @@index([status])
   @@index([createdAt])
   @@index([dueDate])
+}
+
+model Attachment {
+  id         String   @id @default(cuid())
+  taskId     String
+  task       Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  filename   String
+  mimeType   String
+  size       Int
+  storageKey String
+  createdAt  DateTime @default(now())
+
+  @@index([taskId])
 }
 
 model RecurringTask {
