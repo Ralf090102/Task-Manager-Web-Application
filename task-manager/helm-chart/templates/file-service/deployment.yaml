@@ -1,0 +1,61 @@
+{{- if .Values.fileService.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "task-manager.fullname" . }}-file-service
+  labels:
+    {{- include "task-manager.labels" . | nindent 4 }}
+    app.kubernetes.io/component: file-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "task-manager.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: file-service
+  template:
+    metadata:
+      labels:
+        {{- include "task-manager.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: file-service
+    spec:
+      containers:
+        - name: file-service
+          image: "{{ .Values.fileService.image.repository }}:{{ .Values.fileService.image.tag }}"
+          imagePullPolicy: {{ .Values.fileService.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 3005
+              protocol: TCP
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "task-manager.fullname" . }}-secrets
+                  key: database-url
+            - name: MINIO_ENDPOINT
+              value: "http://{{ include "task-manager.fullname" . }}-minio:9000"
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "task-manager.fullname" . }}-minio-secret
+                  key: accessKey
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "task-manager.fullname" . }}-minio-secret
+                  key: secretKey
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.fileService.resources | nindent 12 }}
+{{- end }}

@@ -69,6 +69,38 @@ notification:
       cpu: 100m
       memory: 128Mi
 
+minio:
+  enabled: false
+  image:
+    repository: minio/minio
+    pullPolicy: IfNotPresent
+    tag: latest
+  persistence:
+    size: 10Gi
+  accessKey: "minioadmin"
+  secretKey: "minioadmin"
+  resources:
+    limits:
+      cpu: 250m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+
+fileService:
+  enabled: false
+  image:
+    repository: ralf090102/file-service
+    pullPolicy: IfNotPresent
+    tag: latest
+  resources:
+    limits:
+      cpu: 250m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
 monitoring:
   enabled: true
   serviceMonitor:
