@@ -13,8 +13,8 @@
 #   2. Enable NGINX Ingress controller
 #   3. Verify cluster health
 #   4. Create services/ directory structure (8 microservice subdirs)
-#   5. Build task-manager Docker image inside Minikube
-#   6. Deploy task-manager via Helm (monitoring disabled initially)
+#   5. Build all Docker images (main app + microservices) inside Minikube
+#   6. Deploy task-manager + microservices via Helm (monitoring disabled initially)
 #   7. Install kube-prometheus-stack (Prometheus, Grafana, Alertmanager)
 #   8. Upgrade task-manager with monitoring enabled (ServiceMonitor)
 #   9. Verify: pod status, metrics scraping, Ingress
@@ -70,9 +70,12 @@ MINIKUBE_CPU=4
 MINIKUBE_MEMORY_MB=7168       # 7 GB (fits within Docker Desktop's ~7.9GB default)
 KUBERNETES_VERSION="v1.35.1"
 
-# Docker image name for the main app
+# Docker image names
 APP_NAME="ralf090102/task-manager-app"
 APP_TAG="latest"
+SCHEDULER_IMAGE="ralf090102/scheduler-service"
+NOTIFICATION_IMAGE="ralf090102/notification-service"
+MICROSERVICE_TAG="latest"
 
 # Monitoring (kube-prometheus-stack) Helm release details
 MONITORING_NAMESPACE="monitoring"
@@ -285,42 +288,58 @@ done
 write_ok "Created ${#SERVICE_NAMES[@]} service directories under services/"
 
 # ============================================================================
-# Step 5: Build task-manager Docker Image in Minikube
+# Step 5: Build All Docker Images (Main App + Microservices)
 # ============================================================================
 
-write_step "Step 5: Build task-manager Docker Image"
+write_step "Step 5: Build All Docker Images"
 
-# Build the Next.js Docker image directly inside Minikube's Docker daemon.
-# This avoids pushing to a remote registry — the image is available locally
-# to the cluster immediately.
+# Build Docker images directly inside Minikube's internal Docker daemon.
+# Images built with the host Docker daemon are NOT visible to Minikube pods.
 #
-# We use `minikube image build` instead of `docker build` because Minikube
-# with the Docker driver has its own internal Docker daemon. Images built
-# with the host Docker daemon are NOT visible to Minikube pods.
+# Three images are built:
+#   1. Main app (Next.js)       — context: task-manager/, Dockerfile: ./Dockerfile
+#   2. Scheduler (Node.js/tsx)  — context: task-manager/, Dockerfile: services/scheduler/Dockerfile
+#   3. Notification (Fastify)   — context: task-manager/, Dockerfile: services/notification/Dockerfile
 #
-# The build context is the full task-manager/ directory (needs package.json,
-# next.config.ts, prisma/, src/, public/, etc.)
-# The Dockerfile uses a 3-stage build: deps -> builder -> runner
+# Microservice Dockerfiles use the task-manager/ directory as build context
+# so they can COPY the shared prisma/schema.prisma during Docker build.
+
 BUILD_CONTEXT="${PROJECT_ROOT}/task-manager"
-DOCKERFILE="${BUILD_CONTEXT}/Dockerfile"
 
-write_info "Building image ${APP_NAME}:${APP_TAG} (this takes ~1-2 minutes)..."
-write_info "  Context:   $BUILD_CONTEXT"
-write_info "  Dockerfile: $DOCKERFILE"
-
-minikube image build -t "${APP_NAME}:${APP_TAG}" -f "$DOCKERFILE" "$BUILD_CONTEXT" >/dev/null 2>&1
-
+# --- 5a: Main app image ---
+write_info "Building main app image ${APP_NAME}:${APP_TAG}..."
+minikube image build -t "${APP_NAME}:${APP_TAG}" -f "${BUILD_CONTEXT}/Dockerfile" "$BUILD_CONTEXT" >/dev/null 2>&1
 if [[ $? -ne 0 ]]; then
-    write_err "Docker build failed"
+    write_err "Main app Docker build failed"
     exit 1
 fi
 write_ok "Image built: ${APP_NAME}:${APP_TAG}"
 
+# --- 5b: Scheduler image ---
+write_info "Building scheduler image ${SCHEDULER_IMAGE}:${MICROSERVICE_TAG}..."
+minikube image build -t "${SCHEDULER_IMAGE}:${MICROSERVICE_TAG}" \
+    -f "${BUILD_CONTEXT}/services/scheduler/Dockerfile" "$BUILD_CONTEXT" >/dev/null 2>&1
+if [[ $? -ne 0 ]]; then
+    write_err "Scheduler Docker build failed"
+    exit 1
+fi
+write_ok "Image built: ${SCHEDULER_IMAGE}:${MICROSERVICE_TAG}"
+
+# --- 5c: Notification image ---
+write_info "Building notification image ${NOTIFICATION_IMAGE}:${MICROSERVICE_TAG}..."
+minikube image build -t "${NOTIFICATION_IMAGE}:${MICROSERVICE_TAG}" \
+    -f "${BUILD_CONTEXT}/services/notification/Dockerfile" "$BUILD_CONTEXT" >/dev/null 2>&1
+if [[ $? -ne 0 ]]; then
+    write_err "Notification Docker build failed"
+    exit 1
+fi
+write_ok "Image built: ${NOTIFICATION_IMAGE}:${MICROSERVICE_TAG}"
+
 # ============================================================================
-# Step 6: Deploy task-manager
+# Step 6: Deploy task-manager + Microservices via Helm
 # ============================================================================
 
-write_step "Step 6: Deploy task-manager via Helm"
+write_step "Step 6: Deploy All Services via Helm"
 
 # Check if the ServiceMonitor CRD already exists in the cluster.
 # On a fresh cluster (Step 1 ran), it won't exist yet — deploy with
@@ -350,14 +369,19 @@ fi
 #   - Existing release -> upgrades it
 # This makes the script idempotent for --skip-recreate runs.
 #
-# --set image.pullPolicy=Never
-#   Critical for Minikube local dev: tells K8s to NEVER pull from Docker Hub.
-#   The image was loaded directly into Minikube's daemon (Step 5), so it
-#   exists locally. Without "Never", K8s tries to pull from Docker Hub
-#   and gets ImagePullBackOff.
+# All services are deployed in a single Helm release. Each service's
+# templates are conditionally rendered via {{- if .Values.<svc>.enabled }}.
 #
-# --set monitoring.enabled=$MONITORING_FLAG
-#   Conditionally enable the ServiceMonitor template based on CRD existence
+# --set image.pullPolicy=Never / scheduler.* / notification.*
+#   All local Minikube images must use pullPolicy=Never. Without it, K8s
+#   tries to pull from Docker Hub and gets ImagePullBackOff.
+#
+# --set notification.smtp.* / notification.resources.*
+#   On first deploy, --reuse-values is NOT used, so values.yaml defaults
+#   apply. But all notification.* keys MUST be explicitly set via --set
+#   because the initial deploy reads values.yaml fresh — and the
+#   notification section IS in values.yaml, so defaults are picked up.
+#   However, to be safe and explicit, we set all keys here.
 #
 # --set-string secrets.authTrustHost="true"
 #   NextAuth v5 security setting for non-HTTPS environments.
@@ -377,7 +401,22 @@ helm upgrade --install "$APP_RELEASE" \
     --set "secrets.databaseUrl=${DATABASE_URL}" \
     --set "secrets.nextauthSecret=${NEXTAUTH_SECRET}" \
     --set 'secrets.nextauthUrl=http://task-manager.local' \
-    --set-string 'secrets.authTrustHost=true' >/dev/null 2>&1
+    --set-string 'secrets.authTrustHost=true' \
+    --set scheduler.enabled=true \
+    --set scheduler.image.pullPolicy=Never \
+    --set notification.enabled=true \
+    --set notification.image.repository="${NOTIFICATION_IMAGE}" \
+    --set notification.image.tag="${MICROSERVICE_TAG}" \
+    --set notification.image.pullPolicy=Never \
+    --set notification.smtp.host="" \
+    --set notification.smtp.port="587" \
+    --set notification.smtp.from="noreply@taskmanager.local" \
+    --set notification.smtp.user="" \
+    --set notification.smtp.password="" \
+    --set notification.resources.limits.cpu=250m \
+    --set notification.resources.limits.memory=256Mi \
+    --set notification.resources.requests.cpu=100m \
+    --set notification.resources.requests.memory=128Mi >/dev/null 2>&1
 
 if [[ $? -ne 0 ]]; then
     write_err "Helm deploy failed"
@@ -385,13 +424,13 @@ if [[ $? -ne 0 ]]; then
 fi
 write_ok "Helm release deployed"
 
-# Wait for the task-manager pod to be Running and pass its readiness probe.
-# The readiness probe hits "/" (the Next.js homepage) — if it returns 200,
-# the pod is ready to serve traffic.
-write_info "Waiting for task-manager pod to be ready..."
+# Wait for the main app pod to be Running and pass its readiness probe.
+# Uses app.kubernetes.io/component=app selector to match ONLY the main app
+# pod (not notification or scheduler pods which share the same Helm release).
+write_info "Waiting for task-manager (main app) pod to be ready..."
 kubectl wait --namespace "$APP_NAMESPACE" \
     --for=condition=ready pod \
-    --selector=app.kubernetes.io/instance="$APP_RELEASE" \
+    --selector="app.kubernetes.io/component=app" \
     --timeout=120s >/dev/null 2>&1
 
 if [[ $? -ne 0 ]]; then
@@ -399,7 +438,34 @@ if [[ $? -ne 0 ]]; then
     kubectl get pods -n "$APP_NAMESPACE"
     exit 1
 fi
-write_ok "task-manager pod is running"
+write_ok "task-manager (main app) pod is running"
+
+# Wait for the notification pod to be ready.
+# Uses app.kubernetes.io/component=notification selector for precision.
+write_info "Waiting for notification pod to be ready..."
+kubectl wait --namespace "$APP_NAMESPACE" \
+    --for=condition=ready pod \
+    --selector="app.kubernetes.io/component=notification" \
+    --timeout=120s >/dev/null 2>&1
+
+if [[ $? -ne 0 ]]; then
+    write_err "notification pod did not become ready"
+    write_info "Check logs: kubectl logs -n $APP_NAMESPACE -l app.kubernetes.io/component=notification"
+    exit 1
+fi
+write_ok "notification pod is running"
+
+# Verify the notification service is reachable internally.
+# Uses Node.js fetch() because the slim Next.js image has no curl/wget.
+write_info "Testing notification service health endpoint..."
+NOTIF_HEALTH=$(kubectl exec -n "$APP_NAMESPACE" deployment/"$APP_RELEASE" \
+    -- node -e "fetch('http://${APP_RELEASE}-notification:3004/health').then(r=>r.text()).then(t=>console.log(t))" 2>/dev/null || echo "")
+
+if echo "$NOTIF_HEALTH" | grep -q "ok"; then
+    write_ok "Notification service is healthy"
+else
+    write_err "Notification service health check failed"
+fi
 
 # ============================================================================
 # Step 7: Install kube-prometheus-stack (Monitoring) — fresh cluster only
@@ -520,6 +586,26 @@ write_step "Step 9: Final Verification"
 write_info "task-manager namespace resources:"
 kubectl get all -n "$APP_NAMESPACE"
 
+# --- 9a-2: Verify scheduler CronJob exists ---
+if kubectl get cronjob -n "$APP_NAMESPACE" 2>/dev/null | grep -q "scheduler"; then
+    write_ok "Scheduler CronJob created"
+else
+    write_err "Scheduler CronJob not found"
+fi
+
+# --- 9a-3: Verify notification Deployment and Service exist ---
+if kubectl get deployment -n "$APP_NAMESPACE" 2>/dev/null | grep -q "notification"; then
+    write_ok "Notification Deployment created"
+else
+    write_err "Notification Deployment not found"
+fi
+
+if kubectl get svc -n "$APP_NAMESPACE" 2>/dev/null | grep -q "notification"; then
+    write_ok "Notification Service created"
+else
+    write_err "Notification Service not found"
+fi
+
 # --- 9b: ServiceMonitor created ---
 if kubectl get servicemonitor -n "$APP_NAMESPACE" 2>/dev/null | grep -q "task-manager"; then
     write_ok "ServiceMonitor created"
@@ -602,7 +688,13 @@ done
 write_step "Setup Complete!"
 
 cat << 'EOF'
-  Cluster is ready. Next steps:
+  Cluster is ready. Deployed services:
+
+    - Main app (Next.js)      : http://task-manager.local
+    - Scheduler (CronJob)     : runs every 5 min, creates tasks from recurring templates
+    - Notification (internal) : ClusterIP:3004, email + in-app notifications
+
+  Next steps:
 
   1. Start minikube tunnel (REQUIRED for Ingress access):
      Open a SEPARATE terminal and run:
@@ -620,7 +712,7 @@ cat << 'EOF'
      kubectl port-forward -n monitoring svc/monitoring-kube-prometheus-prometheus 9090:9090
      Open: http://localhost:9090
 
-  Ready for Phase 1: Module 7 (Recurring Task Scheduler) -> Module 1 (Notification Service)
+   Ready for Phase 2: File Attachments (MinIO) -> Real-time (WebSocket)
 EOF
 
 echo ""
