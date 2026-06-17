@@ -1,0 +1,25 @@
+{
+  "name": "file-service",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "File upload/download microservice using MinIO (S3-compatible)",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.744.0",
+    "@fastify/multipart": "^9.0.3",
+    "@prisma/adapter-pg": "^7.8.0",
+    "@prisma/client": "^7.8.0",
+    "fastify": "^5.2.0",
+    "tsx": "^4.19.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "prisma": "^7.8.0",
+    "typescript": "^5.0.0"
+  }
+}
