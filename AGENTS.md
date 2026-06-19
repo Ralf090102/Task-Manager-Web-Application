@@ -178,7 +178,7 @@ Uses Tailwind v4 with new `@import "tailwindcss"` syntax in `globals.css`. Do NO
 
 ### Overview
 
-Expanding the monolith into a microservices architecture. 8 planned modules across 4 phases. Module 7 (Scheduler) and Module 1 (Notification) are implemented.
+Expanding the monolith into a microservices architecture. 8 planned modules across 4 phases. Module 7 (Scheduler), Module 1 (Notification), and Module 2 (File Service + MinIO) are implemented.
 
 ### Module 7: Recurring Task Scheduler (Phase 1)
 
@@ -253,6 +253,68 @@ Expanding the monolith into a microservices architecture. 8 planned modules acro
   # Expected: {"status":"ok"}
   ```
 
+### Module 2: File Service + MinIO (Phase 2)
+
+- **Service**: `services/file-service/` — Node.js Fastify HTTP microservice with S3-compatible storage
+- **Purpose**: File upload/download for task attachments
+- **Runtime**: `tsx` (same pattern as scheduler/notification)
+- **Port**: 3005 (ClusterIP only — no Ingress, internal access only)
+- **Endpoints**: `GET /health`, `POST /upload` (multipart, `x-task-id` header), `GET /download/:id`, `GET /attachments/:taskId`, `DELETE /attachments/:id`
+- **Storage**: MinIO (S3-compatible) running as StatefulSet with persistent volume
+- **Schema**: `Attachment` model (id, taskId, filename, mimeType, size, storageKey, createdAt)
+- **MinIO**: StatefulSet (`minio-0`) with `volumeClaimTemplates` (10Gi), Headless Service + ClusterIP Service, health probes at `/minio/health/live` and `/minio/health/ready`
+- **Bucket**: Auto-created on startup with retry logic (exponential backoff)
+- **initContainer**: Waits for MinIO health endpoint before file-service starts (prevents startup race condition)
+- **Helm templates**: `templates/minio/` (StatefulSet, headless-service, service, secret), `templates/file-service/` (Deployment with initContainer, Service)
+- **values.yaml**: `minio:` section (enabled, image, persistence, accessKey/secretKey, resources), `fileService:` section (enabled, image, resources)
+- **Image**: `ralf090102/file-service:latest`, `minio/minio:latest`
+- **Build context**: `task-manager/` (same as other services)
+- **Deploy commands**:
+  ```bash
+  # Build file-service image (from task-manager/)
+  # Use Docker Desktop + minikube image load if Minikube build OOMs:
+  docker build -t ralf090102/file-service:latest -f services/file-service/Dockerfile .
+  minikube image load ralf090102/file-service:latest
+  # (or: minikube image build -t ralf090102/file-service:latest -f services/file-service/Dockerfile .)
+
+  # Helm upgrade with MinIO + file-service enabled
+  # NOTE: --reuse-values does NOT read new values.yaml keys!
+  # Must pass ALL minio.* and fileService.* values via --set on first deploy:
+  helm upgrade task-manager ./task-manager/helm-chart --namespace task-manager \
+    --reuse-values \
+    --set minio.enabled=true \
+    --set minio.image.repository=minio/minio \
+    --set minio.image.tag=latest \
+    --set minio.image.pullPolicy=Never \
+    --set minio.persistence.size=10Gi \
+    --set minio.accessKey=minioadmin \
+    --set minio.secretKey=minioadmin \
+    --set minio.resources.limits.cpu=250m \
+    --set minio.resources.limits.memory=512Mi \
+    --set minio.resources.requests.cpu=100m \
+    --set minio.resources.requests.memory=256Mi \
+    --set fileService.enabled=true \
+    --set fileService.image.repository=ralf090102/file-service \
+    --set fileService.image.tag=latest \
+    --set fileService.image.pullPolicy=Never \
+    --set fileService.resources.limits.cpu=250m \
+    --set fileService.resources.limits.memory=256Mi \
+    --set fileService.resources.requests.cpu=100m \
+    --set fileService.resources.requests.memory=128Mi
+
+  # Subsequent upgrades only need --reuse-values:
+  helm upgrade task-manager ./task-manager/helm-chart --namespace task-manager --reuse-values
+
+  # Test health endpoints:
+  kubectl exec deployment/task-manager -n task-manager -- node -e "fetch('http://task-manager-minio:9000/minio/health/live').then(r=>console.log('MinIO:',r.status))"
+  kubectl exec deployment/task-manager -n task-manager -- node -e "fetch('http://task-manager-file-service:3005/health').then(r=>r.json()).then(j=>console.log(j))"
+
+  # Debug via test script (inside file-service pod):
+  kubectl exec deployment/task-manager-file-service -n task-manager -- npx tsx scripts/test.ts bucket
+  kubectl exec deployment/task-manager-file-service -n task-manager -- npx tsx scripts/test.ts tasks
+  kubectl exec deployment/task-manager-file-service -n task-manager -- npx tsx scripts/test.ts attachments
+  ```
+
 ### Service Selector Labels (Critical)
 
 The main app Deployment and Service MUST have `app.kubernetes.io/component: app` in their labels/selectors. Without it, the main app Service selector (`app.kubernetes.io/name=task-manager` + `app.kubernetes.io/instance=task-manager`) matches ALL pods with those base labels — including notification pods. This causes traffic to be load-balanced across both pods (Fastify returns 404 for Next.js routes like `/dashboard`).
@@ -260,6 +322,8 @@ The main app Deployment and Service MUST have `app.kubernetes.io/component: app`
 **Rule**: Every service's Deployment pod template and Service selector must include a unique `app.kubernetes.io/component` label:
 - Main app: `app.kubernetes.io/component: app`
 - Notification: `app.kubernetes.io/component: notification`
+- File service: `app.kubernetes.io/component: file-service`
+- MinIO: `app.kubernetes.io/component: minio`
 - Scheduler: N/A (CronJob, no Service)
 
 ### Microservice Pattern (reusable for future services)
@@ -271,6 +335,7 @@ services/<name>/
 ├── tsconfig.json         # moduleResolution: "bundler", noEmit: true
 ├── prisma.config.ts      # Minimal config pointing to shared schema
 ├── src/index.ts          # imports from ./generated/prisma/client.ts
+├── scripts/test.ts       # Debug/test commands (run via npx tsx in pod)
 ├── Dockerfile            # copies shared schema, runs prisma generate, uses tsx
 └── .gitignore
 ```
@@ -283,7 +348,96 @@ helm-chart/templates/
 ├── secret.yaml               # Shared secrets
 ├── task-manager/             # Main app (deployment, service, ingress, servicemonitor)
 ├── scheduler/                # Scheduler (cronjob)
-└── notification/             # Notification (deployment, service, secret)
+├── notification/             # Notification (deployment, service, secret)
+├── minio/                    # MinIO (statefulset, headless-service, service, secret)
+└── file-service/             # File service (deployment with initContainer, service)
 ```
 
 Each service has an `enabled` flag in `values.yaml` for conditional rendering.
+
+### Testing Microservices (ESM + PowerShell)
+
+Microservices use ES modules (`import`) with `tsx` runtime. Testing via `kubectl exec` from PowerShell requires special handling because:
+1. `node -e "..."` runs in CommonJS context — `import` syntax fails
+2. PowerShell interprets `$` in JavaScript (e.g., `$disconnect`)
+3. Nested quoting across PowerShell → kubectl → sh → node is error-prone
+
+**Method 1: Test scripts (recommended)**
+Each service has `scripts/test.ts` with reusable debug commands. Run via tsx:
+```bash
+kubectl exec deployment/task-manager-file-service -n task-manager -- npx tsx scripts/test.ts bucket
+kubectl exec deployment/task-manager-file-service -n task-manager -- npx tsx scripts/test.ts tasks
+kubectl exec deployment/task-manager-file-service -n task-manager -- npx tsx scripts/test.ts attachments
+```
+
+**Method 2: tsx + base64 (for ad-hoc one-liners)**
+Encode the script as base64 to avoid all escaping issues, then eval with tsx:
+```powershell
+$script = 'import { PrismaClient } from "./src/generated/prisma/client.ts"; console.log("hello")'
+$encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script))
+kubectl exec deployment/task-manager-file-service -n task-manager -- npx tsx -e "eval(Buffer.from('$encoded','base64').toString())"
+```
+
+### Service Dependencies (initContainer Pattern)
+
+When a service depends on another service being ready (e.g., file-service needs MinIO), use an `initContainer` that waits for the dependency's health endpoint. This prevents startup race conditions where the service starts before its dependency is ready.
+
+```yaml
+spec:
+  initContainers:
+    - name: wait-for-minio
+      image: busybox:1.35
+      command:
+        - sh
+        - -c
+        - 'until wget -q -O /dev/null http://<service-name>:<port>/health; do echo "waiting"; sleep 2; done'
+  containers:
+    # ... main container ...
+```
+
+**Complementary**: Also implement retry logic in the service code (exponential backoff) as a safety net for runtime failures, not just startup.
+
+### Docker Build Workflow (Minikube OOM Workaround)
+
+Minikube's Docker daemon has limited memory (~7GB). Large `npm ci` builds (e.g., `@aws-sdk/client-s3` has many sub-packages) can trigger `npm error Exit handler never called!` (OOM kill). The workaround: build with Docker Desktop (more memory), then load into Minikube.
+
+```bash
+# 1. Build with Docker Desktop (from task-manager/)
+docker build -t ralf090102/<service>:latest -f services/<service>/Dockerfile .
+
+# 2. Load into Minikube
+minikube image load ralf090102/<service>:latest
+
+# 3. IMPORTANT: Force-remove old image before loading updates
+#    Otherwise Minikube keeps the stale image:
+minikube ssh "docker rmi -f ralf090102/<service>:latest"
+minikube image load ralf090102/<service>:latest
+
+# 4. Restart the deployment to pick up new image
+kubectl rollout restart deployment/task-manager-<service> -n task-manager
+```
+
+**Dockerfile pattern for microservices** (avoids parallel `npm ci` OOM):
+```dockerfile
+FROM node:22-slim AS base
+WORKDIR /app
+COPY services/<name>/package.json services/<name>/package-lock.json* ./
+RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
+
+FROM base AS builder
+COPY prisma/schema.prisma ./prisma/schema.prisma
+COPY services/<name>/prisma.config.ts ./
+RUN npx prisma generate
+COPY services/<name>/tsconfig.json ./
+COPY services/<name>/src/ ./src/
+COPY services/<name>/scripts/ ./scripts/
+
+FROM base AS runner
+RUN npm prune --omit=dev
+ENV NODE_ENV=production
+COPY --from=builder /app/src/ ./src/
+COPY --from=builder /app/scripts/ ./scripts/
+CMD ["npx", "tsx", "src/index.ts"]
+```
+
+Single `npm ci` in `base` stage (sequential, not parallel). `builder` extends `base` (adds prisma generate + src). `runner` extends `base` (prunes dev deps, copies src from builder).

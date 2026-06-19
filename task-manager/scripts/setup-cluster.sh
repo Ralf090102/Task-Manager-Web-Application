@@ -91,6 +91,8 @@ APP_NAME="ralf090102/task-manager-app"
 APP_TAG="latest"
 SCHEDULER_IMAGE="ralf090102/scheduler-service"
 NOTIFICATION_IMAGE="ralf090102/notification-service"
+FILE_SERVICE_IMAGE="ralf090102/file-service"
+MINIO_IMAGE="minio/minio"
 MICROSERVICE_TAG="latest"
 
 # Monitoring (kube-prometheus-stack) Helm release details
@@ -334,7 +336,9 @@ if [[ "$SKIP_BUILDS" == true ]]; then
     # Verify images exist to catch mistakes early
     for img in "${APP_NAME}:${APP_TAG}" \
                "${SCHEDULER_IMAGE}:${MICROSERVICE_TAG}" \
-               "${NOTIFICATION_IMAGE}:${MICROSERVICE_TAG}"; do
+               "${NOTIFICATION_IMAGE}:${MICROSERVICE_TAG}" \
+               "${FILE_SERVICE_IMAGE}:${MICROSERVICE_TAG}" \
+               "${MINIO_IMAGE}:${MICROSERVICE_TAG}"; do
         if ! minikube image ls --format "{{.Repository}}:{{.Tag}}" 2>/dev/null | grep -q "$img"; then
             write_err "Image $img not found in Minikube. Run without --skip-builds first."
             exit 1
@@ -361,6 +365,7 @@ else
         "main-app|${APP_NAME}:${APP_TAG}|${BUILD_CONTEXT}/Dockerfile"
         "scheduler|${SCHEDULER_IMAGE}:${MICROSERVICE_TAG}|${BUILD_CONTEXT}/services/scheduler/Dockerfile"
         "notification|${NOTIFICATION_IMAGE}:${MICROSERVICE_TAG}|${BUILD_CONTEXT}/services/notification/Dockerfile"
+        "file-service|${FILE_SERVICE_IMAGE}:${MICROSERVICE_TAG}|${BUILD_CONTEXT}/services/file-service/Dockerfile"
     )
 
     # Create a temp dir for parallel build logs (so output stays clean)
@@ -406,6 +411,16 @@ else
     fi
 
     write_ok "All ${#BUILDS[@]} images built successfully (parallel)"
+
+    # Pull third-party images (MinIO) that aren't built locally
+    write_info "Pulling MinIO image into Minikube..."
+    minikube image pull "${MINIO_IMAGE}:${MICROSERVICE_TAG}" >/dev/null 2>&1
+    if [[ $? -ne 0 ]]; then
+        write_err "Failed to pull ${MINIO_IMAGE}:${MICROSERVICE_TAG}"
+        write_err "Check internet connection or pull manually: docker pull ${MINIO_IMAGE}:${MICROSERVICE_TAG} && minikube image load ${MINIO_IMAGE}:${MICROSERVICE_TAG}"
+        exit 1
+    fi
+    write_ok "MinIO image loaded"
 fi
 
 # ============================================================================
@@ -493,7 +508,26 @@ helm upgrade --install "$APP_RELEASE" \
     --set notification.resources.limits.cpu=250m \
     --set notification.resources.limits.memory=256Mi \
     --set notification.resources.requests.cpu=100m \
-    --set notification.resources.requests.memory=128Mi >/dev/null 2>&1
+    --set notification.resources.requests.memory=128Mi \
+    --set minio.enabled=true \
+    --set minio.image.repository="${MINIO_IMAGE}" \
+    --set minio.image.tag="${MICROSERVICE_TAG}" \
+    --set minio.image.pullPolicy=Never \
+    --set minio.persistence.size=10Gi \
+    --set minio.accessKey=minioadmin \
+    --set minio.secretKey=minioadmin \
+    --set minio.resources.limits.cpu=250m \
+    --set minio.resources.limits.memory=512Mi \
+    --set minio.resources.requests.cpu=100m \
+    --set minio.resources.requests.memory=256Mi \
+    --set fileService.enabled=true \
+    --set fileService.image.repository="${FILE_SERVICE_IMAGE}" \
+    --set fileService.image.tag="${MICROSERVICE_TAG}" \
+    --set fileService.image.pullPolicy=Never \
+    --set fileService.resources.limits.cpu=250m \
+    --set fileService.resources.limits.memory=256Mi \
+    --set fileService.resources.requests.cpu=100m \
+    --set fileService.resources.requests.memory=128Mi >/dev/null 2>&1
 
 if [[ $? -ne 0 ]]; then
     write_err "Helm deploy failed"
@@ -542,6 +576,47 @@ if echo "$NOTIF_HEALTH" | grep -q "ok"; then
     write_ok "Notification service is healthy"
 else
     write_err "Notification service health check failed"
+fi
+
+# Wait for MinIO StatefulSet pod to be ready.
+# MinIO uses a StatefulSet with stable identity (minio-0).
+write_info "Waiting for MinIO pod to be ready..."
+kubectl wait --namespace "$APP_NAMESPACE" \
+    --for=condition=ready pod \
+    --selector="app.kubernetes.io/component=minio" \
+    --timeout=120s >/dev/null 2>&1
+
+if [[ $? -ne 0 ]]; then
+    write_err "MinIO pod did not become ready"
+    write_info "Check: kubectl get pods -n $APP_NAMESPACE -l app.kubernetes.io/component=minio"
+    exit 1
+fi
+write_ok "MinIO pod is running"
+
+# Wait for file-service pod to be ready.
+# file-service has an initContainer that waits for MinIO health.
+write_info "Waiting for file-service pod to be ready..."
+kubectl wait --namespace "$APP_NAMESPACE" \
+    --for=condition=ready pod \
+    --selector="app.kubernetes.io/component=file-service" \
+    --timeout=120s >/dev/null 2>&1
+
+if [[ $? -ne 0 ]]; then
+    write_err "file-service pod did not become ready"
+    write_info "Check: kubectl logs -n $APP_NAMESPACE -l app.kubernetes.io/component=file-service -c file-service"
+    exit 1
+fi
+write_ok "file-service pod is running"
+
+# Verify the file-service health endpoint.
+write_info "Testing file-service health endpoint..."
+FILE_HEALTH=$(kubectl exec -n "$APP_NAMESPACE" deployment/"$APP_RELEASE" \
+    -- node -e "fetch('http://${APP_RELEASE}-file-service:3005/health').then(r=>r.text()).then(t=>console.log(t))" 2>/dev/null || echo "")
+
+if echo "$FILE_HEALTH" | grep -q "ok"; then
+    write_ok "File service is healthy"
+else
+    write_err "File service health check failed"
 fi
 
 # ============================================================================
@@ -691,6 +766,32 @@ else
     write_err "Notification Service not found"
 fi
 
+# --- 9a-4: Verify MinIO StatefulSet and PVC ---
+if kubectl get statefulset -n "$APP_NAMESPACE" 2>/dev/null | grep -q "minio"; then
+    write_ok "MinIO StatefulSet created"
+else
+    write_err "MinIO StatefulSet not found"
+fi
+
+if kubectl get pvc -n "$APP_NAMESPACE" 2>/dev/null | grep -q "minio"; then
+    write_ok "MinIO PVC created"
+else
+    write_err "MinIO PVC not found"
+fi
+
+# --- 9a-5: Verify file-service Deployment and Service ---
+if kubectl get deployment -n "$APP_NAMESPACE" 2>/dev/null | grep -q "file-service"; then
+    write_ok "File-service Deployment created"
+else
+    write_err "File-service Deployment not found"
+fi
+
+if kubectl get svc -n "$APP_NAMESPACE" 2>/dev/null | grep -q "file-service"; then
+    write_ok "File-service Service created"
+else
+    write_err "File-service Service not found"
+fi
+
 # --- 9b: ServiceMonitor created (skip if monitoring disabled) ---
 if [[ "$SKIP_MONITORING" != true ]]; then
     if kubectl get servicemonitor -n "$APP_NAMESPACE" 2>/dev/null | grep -q "task-manager"; then
@@ -787,6 +888,8 @@ if [[ "$SKIP_MONITORING" == true ]]; then
     - Main app (Next.js)      : http://task-manager.local
     - Scheduler (CronJob)     : runs every 5 min, creates tasks from recurring templates
     - Notification (internal) : ClusterIP:3004, email + in-app notifications
+    - File service (internal) : ClusterIP:3005, file upload/download
+    - MinIO (internal)        : StatefulSet, S3-compatible object storage
 
   Next steps:
 
@@ -807,6 +910,8 @@ else
     - Main app (Next.js)      : http://task-manager.local
     - Scheduler (CronJob)     : runs every 5 min, creates tasks from recurring templates
     - Notification (internal) : ClusterIP:3004, email + in-app notifications
+    - File service (internal) : ClusterIP:3005, file upload/download
+    - MinIO (internal)        : StatefulSet, S3-compatible object storage
 
   Next steps:
 

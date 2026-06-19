@@ -1,10 +1,12 @@
-# Stage 2 - Phase 1 Learning Summary
+# Stage 2 - Phase 1 & 2 Learning Summary
 
-This document explains the core concepts and technologies implemented in Phase 1 of the Task Manager microservices expansion. It covers Module 7 (Recurring Task Scheduler) and Module 1 (Notification Service). Each section includes real examples from your codebase.
+This document explains the core concepts and technologies implemented in Phases 1-2 of the Task Manager microservices expansion. It covers Module 7 (Recurring Task Scheduler), Module 1 (Notification Service), and Module 2 (File Service + MinIO). Each section includes real examples from your codebase.
 
 ---
 
 ## Table of Contents
+
+### Phase 1: Scheduler + Notification
 
 1. [Microservices Architecture in a Monorepo](#microservices-architecture-in-a-monorepo)
 2. [Kubernetes CronJobs](#kubernetes-cronjobs)
@@ -30,6 +32,23 @@ This document explains the core concepts and technologies implemented in Phase 1
 22. [Key Patterns and Best Practices](#key-patterns-and-best-practices)
 23. [Troubleshooting](#troubleshooting)
 
+### Phase 2: File Service + MinIO
+
+24. [Kubernetes StatefulSet](#kubernetes-statefulset)
+25. [PersistentVolumeClaims and volumeClaimTemplates](#persistentvolumeclaims-and-volumeclaimtemplates)
+26. [Headless Service (clusterIP: None)](#headless-service-clusterip-none)
+27. [MinIO: S3-Compatible Object Storage](#minio-s3-compatible-object-storage)
+28. [AWS SDK v3 S3 Client](#aws-sdk-v3-s3-client)
+29. [The initContainer Pattern for Service Dependencies](#the-initcontainer-pattern-for-service-dependencies)
+30. [Exponential Backoff Retry Logic](#exponential-backoff-retry-logic)
+31. [Testing ESM Services from PowerShell](#testing-esm-services-from-powershell)
+32. [Docker Build OOM and the base/builder/runner Pattern](#docker-build-oom-and-the-basebuilder-pattern)
+33. [The `minikube image load` Workflow](#the-minikube-image-load-workflow)
+34. [File Service API Design](#file-service-api-design)
+35. [AWS SDK v3 Response Body Handling](#aws-sdk-v3-response-body-handling)
+36. [Phase 2 Key Patterns and Best Practices](#phase-2-key-patterns-and-best-practices)
+37. [Phase 2 Troubleshooting](#phase-2-troubleshooting)
+
 ---
 
 ## Microservices Architecture in a Monorepo
@@ -45,7 +64,7 @@ task-manager/
 ├── src/                           # Main Next.js app
 ├── services/                      # Microservices directory
 │   ├── notification/              # Module 1 (implemented)
-│   ├── file-service/              # Module 2 (future)
+│   ├── file-service/              # Module 2 (implemented)
 │   ├── analytics/                 # Module 3 (future)
 │   ├── realtime/                  # Module 4 (future)
 │   ├── search-sync/               # Module 5 (future)
@@ -1615,3 +1634,770 @@ In Phase 2, you'll learn:
 - Full-text search indexing (Meilisearch)
 
 This will expand the architecture with stateful workloads and data-heavy services.
+
+---
+
+# Stage 2 - Phase 2 Learning Summary
+
+Phase 2 introduces **stateful workloads** — services that own persistent data and require stable identity. This is a fundamental shift from Phase 1's stateless Deployments.
+
+---
+
+## Table of Contents (Phase 2)
+
+24. [Kubernetes StatefulSet](#kubernetes-statefulset)
+25. [PersistentVolumeClaims and volumeClaimTemplates](#persistentvolumeclaims-and-volumeclaimtemplates)
+26. [Headless Service (clusterIP: None)](#headless-service-clusterip-none)
+27. [MinIO: S3-Compatible Object Storage](#minio-s3-compatible-object-storage)
+28. [AWS SDK v3 S3 Client](#aws-sdk-v3-s3-client)
+29. [The initContainer Pattern for Service Dependencies](#the-initcontainer-pattern-for-service-dependencies)
+30. [Exponential Backoff Retry Logic](#exponential-backoff-retry-logic)
+31. [Testing ESM Services from PowerShell](#testing-esm-services-from-powershell)
+32. [Docker Build OOM and the base/builder/runner Pattern](#docker-build-oom-and-the-basebuilder-pattern)
+33. [The `minikube image load` Workflow](#the-minikube-image-load-workflow)
+34. [File Service API Design](#file-service-api-design)
+35. [AWS SDK v3 Response Body Handling](#aws-sdk-v3-response-body-handling)
+36. [Phase 2 Key Patterns and Best Practices](#phase-2-key-patterns-and-best-practices)
+37. [Phase 2 Troubleshooting](#phase-2-troubleshooting)
+
+---
+
+## Kubernetes StatefulSet
+
+### Deployment vs StatefulSet
+
+In Phase 1, all services used **Deployments** — stateless workloads where pods are interchangeable. Phase 2 introduces **StatefulSets** for services that own persistent data.
+
+| Aspect | Deployment | StatefulSet |
+|--------|------------|-------------|
+| Pod names | Random (`minio-7f4b97b8cd-j6l2j`) | Sequential & stable (`minio-0`) |
+| Pod identity | Interchangeable | Unique & persistent |
+| Storage | Ephemeral (lost on restart) | Persistent (PVC per pod) |
+| Startup order | Random/parallel | Ordered (`minio-0` → `minio-1`) |
+| DNS name | Service name only | `minio-0.minio-headless` (per pod) |
+| Use case | Web servers, APIs | Databases, storage engines |
+
+### Why MinIO Needs a StatefulSet
+
+MinIO is an **S3-compatible storage engine** — it stores files on disk. If the pod restarts, the files must survive. A Deployment would lose all data on restart because pods get new ephemeral storage. A StatefulSet binds each pod to a **PersistentVolumeClaim (PVC)** that persists across restarts.
+
+### StatefulSet Template
+
+```yaml
+# helm-chart/templates/minio/statefulset.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "task-manager.fullname" . }}-minio
+spec:
+  serviceName: {{ include "task-manager.fullname" . }}-minio-headless  # Required: headless service
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "task-manager.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: minio
+  template:
+    metadata:
+      labels:
+        {{- include "task-manager.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: minio
+    spec:
+      containers:
+        - name: minio
+          image: "{{ .Values.minio.image.repository }}:{{ .Values.minio.image.tag }}"
+          args: ["server", "/data", "--console-address", ":9001"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+  volumeClaimTemplates:           # Auto-creates a PVC per pod
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ .Values.minio.persistence.size }}
+```
+
+### Key StatefulSet Properties
+
+**`serviceName`**: Must reference a **headless service** (clusterIP: None). This gives each pod a unique DNS name: `minio-0.minio-headless`.
+
+**`volumeClaimTemplates`**: Automatically creates a PVC for each pod. The PVC name follows the pattern `<volumeclaim-name>-<pod-name>` (e.g., `data-minio-0`).
+
+**Stable identity**: The pod is always named `minio-0`. If it crashes, Kubernetes recreates the same pod name with the same PVC. Data survives.
+
+---
+
+## PersistentVolumeClaims and volumeClaimTemplates
+
+### What Is a PVC?
+
+A **PersistentVolumeClaim (PVC)** is a request for storage. It asks Kubernetes: "I need 10GB of storage that I can read and write." Kubernetes finds a matching **PersistentVolume (PV)** and binds it.
+
+```
+Pod → PVC (request) → PV (actual storage) → Physical disk
+```
+
+### How StatefulSet Creates PVCs
+
+Instead of manually creating PVCs, StatefulSet uses `volumeClaimTemplates`. Each pod gets its own PVC automatically:
+
+```yaml
+volumeClaimTemplates:
+  - metadata:
+      name: data           # Template name
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 10Gi
+```
+
+This creates:
+- Pod `minio-0` → PVC `data-minio-0` (10Gi)
+- Pod `minio-1` → PVC `data-minio-1` (10Gi) (if scaled)
+
+### Verifying PVCs
+
+```bash
+kubectl get pvc -n task-manager
+# NAME              STATUS   VOLUME                               CAPACITY   ACCESS MODES
+# data-minio-0      Bound    pvc-2f106816-ce59-41d7-...           10Gi       RWO
+```
+
+**STATUS: Bound** means Kubernetes found storage and connected it. If it says **Pending**, no StorageClass is available (Minikube includes `standard` by default).
+
+### `ReadWriteOnce` Explained
+
+`accessModes` controls how the volume can be mounted:
+
+| Mode | Meaning |
+|------|---------|
+| `ReadWriteOnce` | One node can read/write (most common) |
+| `ReadOnlyMany` | Multiple nodes can read |
+| `ReadWriteMany` | Multiple nodes can read/write (requires special storage) |
+
+MinIO uses `ReadWriteOnce` because only one pod accesses the data.
+
+### Data Persistence Across Restarts
+
+When Minikube is stopped and restarted:
+- The PVC still exists (stored in Minikube's Docker volume)
+- The data (including auto-created buckets) survives
+- On restart, MinIO reconnects to the same PVC
+
+---
+
+## Headless Service (clusterIP: None)
+
+### What Is a Headless Service?
+
+A standard Service has a ClusterIP — it load-balances across pods. A **headless service** has `clusterIP: None` — it doesn't load-balance. Instead, it returns the **individual pod IPs** via DNS.
+
+```yaml
+# helm-chart/templates/minio/headless-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "task-manager.fullname" . }}-minio-headless
+spec:
+  clusterIP: None          # ← This makes it headless
+  ports:
+    - port: 9000
+      name: api
+    - port: 9001
+      name: console
+  selector:
+    app.kubernetes.io/component: minio
+```
+
+### Why StatefulSets Need Headless Services
+
+StatefulSet pods have stable identities that rely on DNS:
+
+```
+DNS lookup: minio-0.minio-headless
+Result:     10.244.0.211  (pod's individual IP)
+```
+
+This allows:
+- Direct pod-to-pod communication (for clustered databases)
+- Stable DNS names that don't change on restart
+- StatefulSet's `serviceName` field to function
+
+### Two Services for MinIO
+
+MinIO has **two** services:
+
+| Service | Type | Purpose |
+|---------|------|---------|
+| `task-manager-minio` | ClusterIP (normal) | Load-balanced access for file-service |
+| `task-manager-minio-headless` | Headless (clusterIP: None) | Required by StatefulSet for DNS |
+
+The file-service connects to `task-manager-minio:9000` (the normal ClusterIP service). The headless service exists solely to satisfy the StatefulSet requirement.
+
+---
+
+## MinIO: S3-Compatible Object Storage
+
+### What Is MinIO?
+
+**MinIO** is an open-source object storage server that implements the **S3 API**. It's like having Amazon S3 running inside your Kubernetes cluster — no cloud account needed.
+
+```
+File service → S3 API (PutObject, GetObject) → MinIO → Files on disk (PVC)
+```
+
+### Why S3-Compatible?
+
+The S3 API is the **de facto standard** for object storage. By using S3-compatible storage:
+- Code works with MinIO locally and AWS S3 in production (just change the endpoint)
+- The `@aws-sdk/client-s3` npm package works out of the box
+- No vendor lock-in
+
+### MinIO Architecture in K8s
+
+```
+┌──────────────────────────────────────────────────┐
+│                  Kubernetes Cluster               │
+│                                                   │
+│  file-service pod                                 │
+│  └─ S3Client → http://task-manager-minio:9000    │
+│                    │                              │
+│                    ▼                              │
+│  minio-0 (StatefulSet)                            │
+│  ├─ Port 9000: S3 API                             │
+│  ├─ Port 9001: Web Console                        │
+│  └─ /data → PVC (10Gi persistent)                 │
+│                                                   │
+│  Services:                                        │
+│  ├─ task-manager-minio (ClusterIP)                │
+│  └─ task-manager-minio-headless (Headless)        │
+└──────────────────────────────────────────────────┘
+```
+
+### MinIO Health Endpoints
+
+MinIO exposes health endpoints used by Kubernetes probes and initContainers:
+
+```
+/minio/health/live   → Is MinIO running? (200/503)
+/minio/health/ready  → Is MinIO ready to serve? (200/503)
+```
+
+These are used in:
+- **Liveness probe**: Restart pod if MinIO is stuck
+- **Readiness probe**: Remove from Service if not ready
+- **initContainer**: Block file-service startup until MinIO is ready
+
+---
+
+## AWS SDK v3 S3 Client
+
+### What Is @aws-sdk/client-s3?
+
+The official AWS SDK v3 package for JavaScript. It provides a `S3Client` class that sends commands to any S3-compatible storage.
+
+### Configuring the S3 Client
+
+```typescript
+import { S3Client } from "@aws-sdk/client-s3";
+
+const s3 = new S3Client({
+  endpoint: process.env.MINIO_ENDPOINT || "http://localhost:9000",
+  region: "us-east-1",                    // Required by SDK, ignored by MinIO
+  forcePathStyle: true,                   // Use path-style URLs (MinIO requirement)
+  credentials: {
+    accessKeyId: process.env.MINIO_ACCESS_KEY || "minioadmin",
+    secretAccessKey: process.env.MINIO_SECRET_KEY || "minioadmin",
+  },
+});
+```
+
+**`forcePathStyle: true`**: AWS S3 uses virtual-host-style URLs (`bucket.s3.amazonaws.com`). MinIO uses path-style URLs (`minio:9000/bucket`). This flag tells the SDK to use path style.
+
+### Key S3 Commands Used
+
+| Command | Purpose |
+|---------|---------|
+| `HeadBucketCommand` | Check if a bucket exists |
+| `CreateBucketCommand` | Create a new bucket |
+| `PutObjectCommand` | Upload a file |
+| `GetObjectCommand` | Download a file |
+| `DeleteObjectCommand` | Delete a file |
+
+---
+
+## The initContainer Pattern for Service Dependencies
+
+### The Startup Race Condition
+
+When MinIO and file-service start simultaneously:
+1. Kubernetes schedules both pods at the same time
+2. file-service starts and immediately tries to create the S3 bucket
+3. MinIO hasn't finished starting yet → `ECONNREFUSED`
+4. Bucket creation fails silently → uploads fail later
+
+### The Solution: initContainer
+
+An **initContainer** runs before the main container. Kubernetes won't start the main container until all initContainers complete successfully.
+
+```yaml
+spec:
+  initContainers:
+    - name: wait-for-minio
+      image: busybox:1.35
+      command:
+        - sh
+        - -c
+        - 'until wget -q -O /dev/null http://task-manager-minio:9000/minio/health/live; do echo "waiting for minio"; sleep 2; done'
+  containers:
+    - name: file-service
+      # ... main container
+```
+
+### How It Works
+
+1. Pod starts
+2. initContainer `wait-for-minio` runs
+3. It polls MinIO's health endpoint every 2 seconds
+4. When MinIO responds with 200, the loop exits
+5. initContainer completes
+6. Kubernetes starts the main `file-service` container
+7. file-service can now safely create the bucket
+
+### Why busybox?
+
+The file-service image (`node:22-slim`) doesn't have `wget`. `busybox:1.35` is a tiny (~1.2MB) image that includes `wget`. It's the standard choice for initContainers.
+
+### initContainer Logs
+
+```bash
+kubectl logs deployment/task-manager-file-service -n task-manager -c wait-for-minio
+# Output:
+# waiting for minio
+# waiting for minio
+# waiting for minio
+# (empty line when wget succeeds and initContainer exits)
+```
+
+---
+
+## Exponential Backoff Retry Logic
+
+### Why Code-Level Retry Is Also Needed
+
+The initContainer prevents the startup race condition. But MinIO could also become unreachable at runtime (network issues, restarts). The `ensureBucket()` function should retry on failure.
+
+### Implementation
+
+```typescript
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function ensureBucket(attempt = 1): Promise<void> {
+  try {
+    await s3.send(new HeadBucketCommand({ Bucket: BUCKET_NAME }));
+    app.log.info(`[file-service] Bucket "${BUCKET_NAME}" already exists`);
+    return;
+  } catch {
+    // Bucket doesn't exist (or MinIO unreachable) — try to create it
+  }
+
+  try {
+    await s3.send(new CreateBucketCommand({ Bucket: BUCKET_NAME }));
+    app.log.info(`[file-service] Created bucket "${BUCKET_NAME}"`);
+  } catch (err) {
+    if (attempt < 5) {
+      const delay = 1000 * Math.pow(2, attempt);  // 2s, 4s, 8s, 16s
+      app.log.warn({ err, attempt, delay }, `[file-service] Bucket creation failed, retrying...`);
+      await sleep(delay);
+      return ensureBucket(attempt + 1);  // Recursive retry
+    }
+    app.log.error({ err }, `[file-service] Failed to create bucket after ${attempt} attempts`);
+  }
+}
+```
+
+### Exponential Backoff Explained
+
+| Attempt | Delay | Formula |
+|---------|-------|---------|
+| 1 | 2s | `1000 * 2^1` |
+| 2 | 4s | `1000 * 2^2` |
+| 3 | 8s | `1000 * 2^3` |
+| 4 | 16s | `1000 * 2^4` |
+| 5 | (give up) | — |
+
+Each retry waits twice as long. This prevents hammering a recovering service with requests.
+
+---
+
+## Testing ESM Services from PowerShell
+
+### The Problem
+
+Microservices use ES modules (`import`) with the `tsx` runtime. Testing from PowerShell via `kubectl exec` has three challenges:
+1. `node -e "..."` runs in CommonJS context — `import` syntax fails
+2. PowerShell interprets `$` in JavaScript (e.g., `$disconnect`)
+3. Nested quoting across PowerShell → kubectl → sh → node is error-prone
+
+### Method 1: Test Scripts (Recommended)
+
+Each service has `scripts/test.ts` with reusable debug commands:
+
+```bash
+kubectl exec deployment/task-manager-file-service -n task-manager -- npx tsx scripts/test.ts bucket
+kubectl exec deployment/task-manager-file-service -n task-manager -- npx tsx scripts/test.ts tasks
+kubectl exec deployment/task-manager-file-service -n task-manager -- npx tsx scripts/test.ts attachments
+```
+
+The test script uses `import` statements naturally — tsx handles ESM resolution.
+
+### Method 2: tsx + base64 (for ad-hoc one-liners)
+
+Encode the script as base64 to avoid all escaping issues:
+
+```powershell
+$script = 'import { PrismaClient } from "./src/generated/prisma/client.ts"; console.log("hello")'
+$encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script))
+kubectl exec deployment/task-manager-file-service -n task-manager -- npx tsx -e "eval(Buffer.from('$encoded','base64').toString())"
+```
+
+**Important**: `eval()` runs in CommonJS context even with `--input-type=module`. Always wrap in an async IIFE if using `await`:
+
+```powershell
+$script = '(async () => { const res = await fetch("http://localhost:3005/health"); console.log(await res.json()); })();'
+```
+
+### Why tsx Works But node Doesn't
+
+| Issue | `node -e` | `npx tsx -e` |
+|-------|-----------|--------------|
+| `import` syntax | Fails (CJS context) | Works (ESM via esbuild) |
+| `.ts` file imports | Fails (no TS support) | Works (in-memory transpile) |
+| `import.meta.url` | Fails (CJS only) | Works (resolved by esbuild) |
+
+---
+
+## Docker Build OOM and the base/builder/runner Pattern
+
+### The Problem
+
+Minikube's Docker daemon has limited memory (~7GB shared with the host). Building images with large dependency trees (e.g., `@aws-sdk/client-s3` has 50+ sub-packages) can exhaust memory during `npm ci`:
+
+```
+npm error Exit handler never called!
+npm error This is an error with npm itself.
+```
+
+This is npm being killed by the Linux OOM killer — not a code bug.
+
+### The Root Cause: Parallel Stage Builds
+
+The original Dockerfile had two stages that both run `npm ci`:
+
+```dockerfile
+# Stage 1 (deps): runs npm ci --omit=dev
+# Stage 2 (builder): runs npm ci (full)
+# Docker runs these IN PARALLEL → double memory usage
+```
+
+Docker BuildKit parallelizes independent stages. Two simultaneous `npm ci` calls can exceed available memory.
+
+### The Solution: Single Base Stage
+
+Restructure the Dockerfile so `npm ci` runs once in a `base` stage, then `builder` and `runner` extend it:
+
+```dockerfile
+FROM node:22-slim AS base
+WORKDIR /app
+COPY services/file-service/package.json services/file-service/package-lock.json* ./
+RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
+
+FROM base AS builder
+COPY prisma/schema.prisma ./prisma/schema.prisma
+COPY services/file-service/prisma.config.ts ./
+RUN npx prisma generate
+COPY services/file-service/tsconfig.json ./
+COPY services/file-service/src/ ./src/
+COPY services/file-service/scripts/ ./scripts/
+
+FROM base AS runner
+RUN npm prune --omit=dev
+ENV NODE_ENV=production
+COPY --from=builder /app/src/ ./src/
+COPY --from=builder /app/scripts/ ./scripts/
+CMD ["npx", "tsx", "src/index.ts"]
+```
+
+| Stage | Extends | Purpose |
+|-------|---------|---------|
+| `base` | — | Single `npm ci` (all deps) |
+| `builder` | `base` | Adds Prisma generate + src copy |
+| `runner` | `base` | Prunes dev deps, copies from builder |
+
+Single `npm ci` → sequential → no OOM.
+
+### Additional Improvements
+
+- `--mount=type=cache,target=/root/.npm` — caches npm downloads between builds
+- `--no-audit --no-fund` — skips npm's audit and funding checks (reduces overhead)
+- `npm prune --omit=dev` in runner — removes TypeScript, @types/* (dev deps not needed at runtime)
+
+---
+
+## The `minikube image load` Workflow
+
+### When Minikube Build Fails
+
+If `minikube image build` fails (OOM, timeout), use Docker Desktop to build and then load the image into Minikube:
+
+```bash
+# 1. Build with Docker Desktop (has more memory than Minikube's daemon)
+docker build -t ralf090102/file-service:latest -f services/file-service/Dockerfile .
+
+# 2. Load into Minikube
+minikube image load ralf090102/file-service:latest
+
+# 3. Force-remove old image before loading updates (CRITICAL!)
+minikube ssh "docker rmi -f ralf090102/file-service:latest"
+minikube image load ralf090102/file-service:latest
+
+# 4. Restart the deployment
+kubectl rollout restart deployment/task-manager-file-service -n task-manager
+```
+
+### Why Force-Remove Is Needed
+
+`minikube image load` doesn't overwrite images with the same tag. If `ralf090102/file-service:latest` already exists in Minikube, loading a new image with the same tag silently keeps the **old** image. The pod continues running old code.
+
+```bash
+# Without force-remove: pod runs OLD code despite loading new image
+# With force-remove: pod picks up the NEW image after restart
+```
+
+### Verifying the Image Updated
+
+```bash
+# Check the code in the running container
+kubectl exec deployment/task-manager-file-service -n task-manager -c file-service -- cat src/index.ts | grep "transformToByteArray"
+```
+
+---
+
+## File Service API Design
+
+### Endpoints
+
+| Method | Route | Headers | Purpose |
+|--------|-------|---------|---------|
+| `GET` | `/health` | — | Health check (liveness/readiness) |
+| `POST` | `/upload` | `x-task-id` | Upload a file (multipart/form-data) |
+| `GET` | `/download/:id` | — | Download a file by attachment ID |
+| `GET` | `/attachments/:taskId` | — | List attachments for a task |
+| `DELETE` | `/attachments/:id` | — | Delete an attachment |
+
+### Upload Flow
+
+```
+Client → POST /upload (multipart, x-task-id header)
+  │
+  ├── file-service receives file via @fastify/multipart
+  ├── Uploads to MinIO: bucket/taskId/filename
+  ├── Creates Attachment record in PostgreSQL
+  └── Returns: { id, taskId, filename, mimeType, size, storageKey, createdAt }
+```
+
+### Dual Storage Strategy
+
+Each file is stored in **two** places:
+1. **MinIO** — the actual file bytes (`storageKey: "taskId/filename"`)
+2. **PostgreSQL** — metadata record (filename, mimeType, size, storageKey)
+
+This separates the large binary data (MinIO) from queryable metadata (PostgreSQL).
+
+### Attachment Schema
+
+```prisma
+model Attachment {
+  id         String   @id @default(cuid())
+  taskId     String
+  task       Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  filename   String
+  mimeType   String
+  size       Int
+  storageKey String
+  createdAt  DateTime @default(now())
+
+  @@index([taskId])
+}
+```
+
+**`storageKey`**: The MinIO object key (`taskId/filename`). Used to retrieve the file from MinIO.
+
+**Cascade Delete**: When a task is deleted, its attachment record is deleted. (Note: the MinIO object must be deleted separately via the file-service API.)
+
+---
+
+## AWS SDK v3 Response Body Handling
+
+### The Problem
+
+AWS SDK v3's `GetObjectCommand` returns the body as a `ChecksumStream`, not a standard web `ReadableStream`. Common approaches fail:
+
+| Approach | Error |
+|----------|-------|
+| `reply.send(response.body)` | Empty response (Fastify can't serialize the stream) |
+| `Readable.fromWeb(response.body)` | `ERR_INVALID_ARG_TYPE: Received undefined` (property is `Body`, not `body`) |
+| `Readable.fromWeb(response.Body)` | `ERR_INVALID_ARG_TYPE: Received an instance of ChecksumStream` (not a web ReadableStream) |
+
+### The Solution: `transformToByteArray()`
+
+The AWS SDK v3 `Body` object has built-in transform methods:
+
+```typescript
+const bytes = await response.Body!.transformToByteArray();
+return reply.send(Buffer.from(bytes));
+```
+
+| Method | Returns | Use Case |
+|--------|---------|----------|
+| `transformToByteArray()` | `Promise<Uint8Array>` | Binary files (images, PDFs) |
+| `transformToString()` | `Promise<string>` | Text files |
+| `transformToWebStream()` | `ReadableStream` | Streaming (advanced) |
+
+For a general-purpose download endpoint, `transformToByteArray()` + `Buffer.from()` works for both text and binary files.
+
+### Note on `Body` vs `body`
+
+AWS SDK v3 uses **capital `B`**: `response.Body`, not `response.body`. The lowercase version returns `undefined`.
+
+---
+
+## Phase 2 Key Patterns and Best Practices
+
+### 1. StatefulSet for Persistent Data
+
+Any service that owns data (database, storage engine, search index) should use a StatefulSet, not a Deployment. This ensures data survives pod restarts.
+
+### 2. Headless Service Is Required
+
+StatefulSet's `serviceName` field must reference a headless service. Without it, pods can't get stable DNS names and the StatefulSet won't function.
+
+### 3. initContainer for Startup Ordering
+
+When a service depends on another, use an initContainer to wait for the dependency's health endpoint. This is the Kubernetes-native way to handle startup ordering.
+
+### 4. Code-Level Retry as Safety Net
+
+initContainers handle startup, but runtime failures need code-level retry. Use exponential backoff to avoid overwhelming a recovering service.
+
+### 5. Dual Storage (Object + Metadata)
+
+Store large files in object storage (MinIO/S3) and keep only metadata in the relational database. This keeps the database fast and leverages each storage system's strengths.
+
+### 6. Docker Build Memory Management
+
+Use a single `base` stage with one `npm ci` call to avoid parallel builds exhausting Docker daemon memory. Add `--mount=type=cache` for faster rebuilds.
+
+### 7. Force-Remove Before Image Load
+
+When updating images via `minikube image load`, always `docker rmi -f` the old image first. Otherwise Minikube keeps the stale image and pods run old code.
+
+---
+
+## Phase 2 Troubleshooting
+
+### Issue 10: `npm error Exit handler never called!` during Docker build
+
+**Cause**: npm is killed by OOM in Minikube's Docker daemon (limited memory). Two parallel `npm ci` stages double memory usage.
+
+**Solution**: Restructure Dockerfile to single `base` stage (sequential `npm ci`). Or build with Docker Desktop and load into Minikube. See [Docker Build OOM](#docker-build-oom-and-the-basebuilder-pattern).
+
+### Issue 11: Bucket creation fails (`ECONNREFUSED`) on startup
+
+**Cause**: file-service starts before MinIO is ready. No initContainer or retry logic.
+
+**Solution**: Add initContainer that waits for MinIO health endpoint. Also add exponential backoff retry in `ensureBucket()`. See [initContainer Pattern](#the-initcontainer-pattern-for-service-dependencies).
+
+### Issue 12: Download returns empty content or 500 error
+
+**Cause**: AWS SDK v3 returns `ChecksumStream` for `Body`, which Fastify can't send directly.
+
+**Solution**: Use `response.Body!.transformToByteArray()` to convert to bytes, then `Buffer.from()`. See [AWS SDK v3 Response Body Handling](#aws-sdk-v3-response-body-handling).
+
+### Issue 13: Pod runs old code after image rebuild
+
+**Cause**: `minikube image load` doesn't overwrite images with the same tag. The old image persists.
+
+**Solution**: Force-remove the old image before loading:
+```bash
+minikube ssh "docker rmi -f ralf090102/file-service:latest"
+minikube image load ralf090102/file-service:latest
+kubectl rollout restart deployment/task-manager-file-service -n task-manager
+```
+
+### Issue 14: `Cannot use import statement outside a module`
+
+**Cause**: Testing ESM service code via `node -e` runs in CommonJS context. `import` syntax fails.
+
+**Solution**: Use `npx tsx -e` instead of `node -e`. Or use test scripts via `npx tsx scripts/test.ts`. See [Testing ESM Services](#testing-esm-services-from-powershell).
+
+### Issue 15: `await is only valid in async functions` (tsx eval)
+
+**Cause**: `eval()` inside `tsx -e` runs in CommonJS context, even with `--input-type=module`. Top-level `await` fails.
+
+**Solution**: Wrap the script in an async IIFE: `(async () => { ... })();`
+
+### Issue 16: Prometheus 404 on `/api/metrics` for file-service
+
+**Cause**: The ServiceMonitor targets the main app only, but Prometheus may try to scrape all services. The file-service doesn't have a `/api/metrics` endpoint.
+
+**Solution**: This is harmless (404 logged in file-service logs). The ServiceMonitor correctly targets only the main app via label selectors.
+
+---
+
+## What You've Learned in Stage 2 - Phase 2
+
+### Technologies Mastered:
+- Kubernetes StatefulSet workload type
+- PersistentVolumeClaims (PVC) and `volumeClaimTemplates`
+- Headless Services (`clusterIP: None`)
+- MinIO S3-compatible object storage
+- AWS SDK v3 S3 Client (`@aws-sdk/client-s3`)
+- `@fastify/multipart` for file uploads
+- initContainer pattern for service dependencies
+- Exponential backoff retry logic
+- ESM testing patterns (tsx + base64, test scripts)
+- Docker build memory optimization (base/builder/runner pattern)
+- `minikube image load` workflow with force-removal
+- AWS SDK v3 response body handling (`transformToByteArray`)
+
+### Core Concepts:
+- StatefulSet vs Deployment (stable identity, persistent storage)
+- PVC lifecycle (Pending → Bound, survives restarts)
+- Headless service DNS (per-pod names: `minio-0.minio-headless`)
+- S3 API compatibility (MinIO as local S3 replacement)
+- Object storage vs relational storage (files in MinIO, metadata in PostgreSQL)
+- Startup ordering via initContainers
+- Code-level retry as runtime safety net
+- Docker daemon memory limits and OOM kills
+- Image caching and the stale-image problem
+
+### Best Practices:
+- Use StatefulSet for any service that owns persistent data
+- Always pair StatefulSet with a headless service
+- Use initContainer + code retry for dependent service startup
+- Store file bytes in object storage, metadata in database
+- Single `npm ci` in Docker base stage (avoid parallel OOM)
+- Force-remove old images before loading new ones into Minikube
+- Use `transformToByteArray()` for AWS SDK v3 response bodies
+- Test scripts in each service for reliable kubectl debugging
+
+### Troubleshooting Skills:
+- Diagnosing Docker build OOM errors
+- Debugging startup race conditions between services
+- Fixing AWS SDK v3 stream handling issues
+- Resolving stale Minikube images
+- Testing ESM services without curl/wget
