@@ -92,7 +92,10 @@ APP_TAG="latest"
 SCHEDULER_IMAGE="ralf090102/scheduler-service"
 NOTIFICATION_IMAGE="ralf090102/notification-service"
 FILE_SERVICE_IMAGE="ralf090102/file-service"
+SEARCH_SYNC_IMAGE="ralf090102/search-sync-service"
 MINIO_IMAGE="minio/minio"
+MEILISEARCH_IMAGE="getmeili/meilisearch"
+MEILISEARCH_TAG="v1.6"
 MICROSERVICE_TAG="latest"
 
 # Monitoring (kube-prometheus-stack) Helm release details
@@ -338,7 +341,9 @@ if [[ "$SKIP_BUILDS" == true ]]; then
                "${SCHEDULER_IMAGE}:${MICROSERVICE_TAG}" \
                "${NOTIFICATION_IMAGE}:${MICROSERVICE_TAG}" \
                "${FILE_SERVICE_IMAGE}:${MICROSERVICE_TAG}" \
-               "${MINIO_IMAGE}:${MICROSERVICE_TAG}"; do
+               "${SEARCH_SYNC_IMAGE}:${MICROSERVICE_TAG}" \
+               "${MINIO_IMAGE}:${MICROSERVICE_TAG}" \
+               "${MEILISEARCH_IMAGE}:${MEILISEARCH_TAG}"; do
         if ! minikube image ls --format "{{.Repository}}:{{.Tag}}" 2>/dev/null | grep -q "$img"; then
             write_err "Image $img not found in Minikube. Run without --skip-builds first."
             exit 1
@@ -366,6 +371,7 @@ else
         "scheduler|${SCHEDULER_IMAGE}:${MICROSERVICE_TAG}|${BUILD_CONTEXT}/services/scheduler/Dockerfile"
         "notification|${NOTIFICATION_IMAGE}:${MICROSERVICE_TAG}|${BUILD_CONTEXT}/services/notification/Dockerfile"
         "file-service|${FILE_SERVICE_IMAGE}:${MICROSERVICE_TAG}|${BUILD_CONTEXT}/services/file-service/Dockerfile"
+        "search-sync|${SEARCH_SYNC_IMAGE}:${MICROSERVICE_TAG}|${BUILD_CONTEXT}/services/search-sync/Dockerfile"
     )
 
     # Create a temp dir for parallel build logs (so output stays clean)
@@ -412,7 +418,7 @@ else
 
     write_ok "All ${#BUILDS[@]} images built successfully (parallel)"
 
-    # Pull third-party images (MinIO) that aren't built locally
+    # Pull third-party images (MinIO, Meilisearch) that aren't built locally
     write_info "Pulling MinIO image into Minikube..."
     minikube image pull "${MINIO_IMAGE}:${MICROSERVICE_TAG}" >/dev/null 2>&1
     if [[ $? -ne 0 ]]; then
@@ -421,6 +427,15 @@ else
         exit 1
     fi
     write_ok "MinIO image loaded"
+
+    write_info "Pulling Meilisearch image into Minikube..."
+    minikube image pull "${MEILISEARCH_IMAGE}:${MEILISEARCH_TAG}" >/dev/null 2>&1
+    if [[ $? -ne 0 ]]; then
+        write_err "Failed to pull ${MEILISEARCH_IMAGE}:${MEILISEARCH_TAG}"
+        write_err "Check internet connection or pull manually: docker pull ${MEILISEARCH_IMAGE}:${MEILISEARCH_TAG} && minikube image load ${MEILISEARCH_IMAGE}:${MEILISEARCH_TAG}"
+        exit 1
+    fi
+    write_ok "Meilisearch image loaded"
 fi
 
 # ============================================================================
@@ -527,7 +542,25 @@ helm upgrade --install "$APP_RELEASE" \
     --set fileService.resources.limits.cpu=250m \
     --set fileService.resources.limits.memory=256Mi \
     --set fileService.resources.requests.cpu=100m \
-    --set fileService.resources.requests.memory=128Mi >/dev/null 2>&1
+    --set fileService.resources.requests.memory=128Mi \
+    --set meilisearch.enabled=true \
+    --set meilisearch.image.repository="${MEILISEARCH_IMAGE}" \
+    --set meilisearch.image.tag="${MEILISEARCH_TAG}" \
+    --set meilisearch.image.pullPolicy=Never \
+    --set meilisearch.persistence.size=5Gi \
+    --set meilisearch.masterKey="meili-master-key-change-me" \
+    --set meilisearch.resources.limits.cpu=250m \
+    --set meilisearch.resources.limits.memory=512Mi \
+    --set meilisearch.resources.requests.cpu=100m \
+    --set meilisearch.resources.requests.memory=256Mi \
+    --set searchSync.enabled=true \
+    --set searchSync.image.repository="${SEARCH_SYNC_IMAGE}" \
+    --set searchSync.image.tag="${MICROSERVICE_TAG}" \
+    --set searchSync.image.pullPolicy=Never \
+    --set searchSync.resources.limits.cpu=250m \
+    --set searchSync.resources.limits.memory=256Mi \
+    --set searchSync.resources.requests.cpu=100m \
+    --set searchSync.resources.requests.memory=128Mi >/dev/null 2>&1
 
 if [[ $? -ne 0 ]]; then
     write_err "Helm deploy failed"
@@ -617,6 +650,58 @@ if echo "$FILE_HEALTH" | grep -q "ok"; then
     write_ok "File service is healthy"
 else
     write_err "File service health check failed"
+fi
+
+# Wait for Meilisearch StatefulSet pod to be ready.
+# Meilisearch uses a StatefulSet with stable identity (meilisearch-0).
+write_info "Waiting for Meilisearch pod to be ready..."
+kubectl wait --namespace "$APP_NAMESPACE" \
+    --for=condition=ready pod \
+    --selector="app.kubernetes.io/component=meilisearch" \
+    --timeout=120s >/dev/null 2>&1
+
+if [[ $? -ne 0 ]]; then
+    write_err "Meilisearch pod did not become ready"
+    write_info "Check: kubectl get pods -n $APP_NAMESPACE -l app.kubernetes.io/component=meilisearch"
+    exit 1
+fi
+write_ok "Meilisearch pod is running"
+
+# Verify Meilisearch is reachable internally.
+write_info "Testing Meilisearch health endpoint..."
+MEILI_HEALTH=$(kubectl exec -n "$APP_NAMESPACE" deployment/"$APP_RELEASE" \
+    -- node -e "fetch('http://${APP_RELEASE}-meilisearch:7700/health').then(r=>r.text()).then(t=>console.log(t))" 2>/dev/null || echo "")
+
+if echo "$MEILI_HEALTH" | grep -q "available"; then
+    write_ok "Meilisearch is healthy"
+else
+    write_err "Meilisearch health check failed"
+fi
+
+# Wait for search-sync pod to be ready.
+# search-sync has an initContainer that waits for Meilisearch health.
+write_info "Waiting for search-sync pod to be ready..."
+kubectl wait --namespace "$APP_NAMESPACE" \
+    --for=condition=ready pod \
+    --selector="app.kubernetes.io/component=search-sync" \
+    --timeout=120s >/dev/null 2>&1
+
+if [[ $? -ne 0 ]]; then
+    write_err "search-sync pod did not become ready"
+    write_info "Check: kubectl logs -n $APP_NAMESPACE -l app.kubernetes.io/component=search-sync -c search-sync"
+    exit 1
+fi
+write_ok "search-sync pod is running"
+
+# Verify the search-sync health endpoint.
+write_info "Testing search-sync health endpoint..."
+SYNC_HEALTH=$(kubectl exec -n "$APP_NAMESPACE" deployment/"$APP_RELEASE" \
+    -- node -e "fetch('http://${APP_RELEASE}-search-sync:3006/health').then(r=>r.text()).then(t=>console.log(t))" 2>/dev/null || echo "")
+
+if echo "$SYNC_HEALTH" | grep -q "ok"; then
+    write_ok "Search sync service is healthy"
+else
+    write_err "Search sync service health check failed"
 fi
 
 # ============================================================================
@@ -792,6 +877,32 @@ else
     write_err "File-service Service not found"
 fi
 
+# --- 9a-6: Verify Meilisearch StatefulSet and PVC ---
+if kubectl get statefulset -n "$APP_NAMESPACE" 2>/dev/null | grep -q "meilisearch"; then
+    write_ok "Meilisearch StatefulSet created"
+else
+    write_err "Meilisearch StatefulSet not found"
+fi
+
+if kubectl get pvc -n "$APP_NAMESPACE" 2>/dev/null | grep -q "meilisearch"; then
+    write_ok "Meilisearch PVC created"
+else
+    write_err "Meilisearch PVC not found"
+fi
+
+# --- 9a-7: Verify search-sync Deployment and Service ---
+if kubectl get deployment -n "$APP_NAMESPACE" 2>/dev/null | grep -q "search-sync"; then
+    write_ok "Search-sync Deployment created"
+else
+    write_err "Search-sync Deployment not found"
+fi
+
+if kubectl get svc -n "$APP_NAMESPACE" 2>/dev/null | grep -q "search-sync"; then
+    write_ok "Search-sync Service created"
+else
+    write_err "Search-sync Service not found"
+fi
+
 # --- 9b: ServiceMonitor created (skip if monitoring disabled) ---
 if [[ "$SKIP_MONITORING" != true ]]; then
     if kubectl get servicemonitor -n "$APP_NAMESPACE" 2>/dev/null | grep -q "task-manager"; then
@@ -890,6 +1001,8 @@ if [[ "$SKIP_MONITORING" == true ]]; then
     - Notification (internal) : ClusterIP:3004, email + in-app notifications
     - File service (internal) : ClusterIP:3005, file upload/download
     - MinIO (internal)        : StatefulSet, S3-compatible object storage
+    - Search sync (internal)  : ClusterIP:3006, indexes tasks to Meilisearch
+    - Meilisearch (internal)  : StatefulSet, full-text search engine
 
   Next steps:
 
@@ -912,6 +1025,8 @@ else
     - Notification (internal) : ClusterIP:3004, email + in-app notifications
     - File service (internal) : ClusterIP:3005, file upload/download
     - MinIO (internal)        : StatefulSet, S3-compatible object storage
+    - Search sync (internal)  : ClusterIP:3006, indexes tasks to Meilisearch
+    - Meilisearch (internal)  : StatefulSet, full-text search engine
 
   Next steps:
 
@@ -931,7 +1046,7 @@ else
      kubectl port-forward -n monitoring svc/monitoring-kube-prometheus-prometheus 9090:9090
      Open: http://localhost:9090
 
-   Ready for Phase 2: File Attachments (MinIO) -> Real-time (WebSocket)
+   Ready for Phase 3: WebSocket (real-time) -> Python Analytics
 EOF
 fi
 
