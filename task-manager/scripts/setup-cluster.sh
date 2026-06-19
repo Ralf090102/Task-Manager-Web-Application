@@ -14,14 +14,20 @@
 #   3. Verify cluster health
 #   4. Create services/ directory structure (8 microservice subdirs)
 #   5. Build all Docker images (main app + microservices) inside Minikube
-#   6. Deploy task-manager + microservices via Helm (monitoring disabled initially)
+#      [--skip-builds: skip Docker builds, reuse existing images]
+#      [Images are built in PARALLEL for speed (~2-3x faster)]
+#   6. Deploy task-manager + microservices via Helm
 #   7. Install kube-prometheus-stack (Prometheus, Grafana, Alertmanager)
+#      [--skip-monitoring: skip monitoring stack entirely]
 #   8. Upgrade task-manager with monitoring enabled (ServiceMonitor)
 #   9. Verify: pod status, metrics scraping, Ingress
 #
 # Usage:
-#   Full teardown + rebuild:  ./setup-cluster.sh
-#   Reuse existing cluster:   ./setup-cluster.sh --skip-recreate
+#   Full teardown + rebuild:       ./setup-cluster.sh
+#   Reuse existing cluster:        ./setup-cluster.sh --skip-recreate
+#   Skip builds (code unchanged):  ./setup-cluster.sh --skip-recreate --skip-builds
+#   Skip monitoring:               ./setup-cluster.sh --skip-recreate --skip-monitoring
+#   Fastest (just redeploy):       ./setup-cluster.sh --skip-recreate --skip-builds --skip-monitoring
 #
 # Prerequisites:
 #   - Docker Desktop (with at least 7GB memory allocated)
@@ -41,6 +47,8 @@ set -euo pipefail
 # ============================================================================
 
 SKIP_RECREATE=false
+SKIP_BUILDS=false
+SKIP_MONITORING=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -48,9 +56,17 @@ while [[ $# -gt 0 ]]; do
             SKIP_RECREATE=true
             shift
             ;;
+        --skip-builds|-SkipBuilds)
+            SKIP_BUILDS=true
+            shift
+            ;;
+        --skip-monitoring|-SkipMonitoring)
+            SKIP_MONITORING=true
+            shift
+            ;;
         *)
             echo "  [!!] Unknown argument: $1"
-            echo "  Usage: $0 [--skip-recreate]"
+            echo "  Usage: $0 [--skip-recreate] [--skip-builds] [--skip-monitoring]"
             exit 1
             ;;
     esac
@@ -121,6 +137,22 @@ test_command() {
 # ============================================================================
 
 write_step "Pre-flight Checks"
+
+# --skip-builds without --skip-recreate is dangerous: recreating the cluster
+# wipes all locally-loaded images. Pods would fail with ImagePullBackOff.
+if [[ "$SKIP_BUILDS" == true && "$SKIP_RECREATE" == false ]]; then
+    write_err "--skip-builds without --skip-recreate will recreate the cluster"
+    write_err "and wipe all locally-loaded images. Use:"
+    write_err "  ./setup-cluster.sh --skip-recreate --skip-builds"
+    exit 1
+fi
+
+if [[ "$SKIP_BUILDS" == true ]]; then
+    write_info "Docker builds will be SKIPPED (--skip-builds)"
+fi
+if [[ "$SKIP_MONITORING" == true ]]; then
+    write_info "Monitoring stack will be SKIPPED (--skip-monitoring)"
+fi
 
 # Verify required tools are installed before doing anything destructive
 for tool in minikube kubectl helm docker; do
@@ -291,49 +323,90 @@ write_ok "Created ${#SERVICE_NAMES[@]} service directories under services/"
 # Step 5: Build All Docker Images (Main App + Microservices)
 # ============================================================================
 
-write_step "Step 5: Build All Docker Images"
-
-# Build Docker images directly inside Minikube's internal Docker daemon.
-# Images built with the host Docker daemon are NOT visible to Minikube pods.
-#
-# Three images are built:
-#   1. Main app (Next.js)       — context: task-manager/, Dockerfile: ./Dockerfile
-#   2. Scheduler (Node.js/tsx)  — context: task-manager/, Dockerfile: services/scheduler/Dockerfile
-#   3. Notification (Fastify)   — context: task-manager/, Dockerfile: services/notification/Dockerfile
-#
-# Microservice Dockerfiles use the task-manager/ directory as build context
-# so they can COPY the shared prisma/schema.prisma during Docker build.
-
 BUILD_CONTEXT="${PROJECT_ROOT}/task-manager"
 
-# --- 5a: Main app image ---
-write_info "Building main app image ${APP_NAME}:${APP_TAG}..."
-minikube image build -t "${APP_NAME}:${APP_TAG}" -f "${BUILD_CONTEXT}/Dockerfile" "$BUILD_CONTEXT" >/dev/null 2>&1
-if [[ $? -ne 0 ]]; then
-    write_err "Main app Docker build failed"
-    exit 1
-fi
-write_ok "Image built: ${APP_NAME}:${APP_TAG}"
+if [[ "$SKIP_BUILDS" == true ]]; then
+    write_step "Step 5: Build All Docker Images (SKIPPED)"
 
-# --- 5b: Scheduler image ---
-write_info "Building scheduler image ${SCHEDULER_IMAGE}:${MICROSERVICE_TAG}..."
-minikube image build -t "${SCHEDULER_IMAGE}:${MICROSERVICE_TAG}" \
-    -f "${BUILD_CONTEXT}/services/scheduler/Dockerfile" "$BUILD_CONTEXT" >/dev/null 2>&1
-if [[ $? -ne 0 ]]; then
-    write_err "Scheduler Docker build failed"
-    exit 1
-fi
-write_ok "Image built: ${SCHEDULER_IMAGE}:${MICROSERVICE_TAG}"
+    write_info "Skipping Docker builds (--skip-builds flag)"
+    write_info "Using existing images already loaded in Minikube"
 
-# --- 5c: Notification image ---
-write_info "Building notification image ${NOTIFICATION_IMAGE}:${MICROSERVICE_TAG}..."
-minikube image build -t "${NOTIFICATION_IMAGE}:${MICROSERVICE_TAG}" \
-    -f "${BUILD_CONTEXT}/services/notification/Dockerfile" "$BUILD_CONTEXT" >/dev/null 2>&1
-if [[ $? -ne 0 ]]; then
-    write_err "Notification Docker build failed"
-    exit 1
+    # Verify images exist to catch mistakes early
+    for img in "${APP_NAME}:${APP_TAG}" \
+               "${SCHEDULER_IMAGE}:${MICROSERVICE_TAG}" \
+               "${NOTIFICATION_IMAGE}:${MICROSERVICE_TAG}"; do
+        if ! minikube image ls --format "{{.Repository}}:{{.Tag}}" 2>/dev/null | grep -q "$img"; then
+            write_err "Image $img not found in Minikube. Run without --skip-builds first."
+            exit 1
+        fi
+        write_ok "Image exists: $img"
+    done
+else
+    write_step "Step 5: Build All Docker Images (Parallel)"
+
+    # Build Docker images directly inside Minikube's internal Docker daemon.
+    # Images built with the host Docker daemon are NOT visible to Minikube pods.
+    #
+    # Three images are built IN PARALLEL for speed (~2-3x faster than sequential):
+    #   1. Main app (Next.js)       — context: task-manager/, Dockerfile: ./Dockerfile
+    #   2. Scheduler (Node.js/tsx)  — context: task-manager/, Dockerfile: services/scheduler/Dockerfile
+    #   3. Notification (Fastify)   — context: task-manager/, Dockerfile: services/notification/Dockerfile
+    #
+    # Microservice Dockerfiles use the task-manager/ directory as build context
+    # so they can COPY the shared prisma/schema.prisma during Docker build.
+
+    # Build definitions: "name|tag|dockerfile"
+    # To add a new microservice build, just append a line to this array.
+    BUILDS=(
+        "main-app|${APP_NAME}:${APP_TAG}|${BUILD_CONTEXT}/Dockerfile"
+        "scheduler|${SCHEDULER_IMAGE}:${MICROSERVICE_TAG}|${BUILD_CONTEXT}/services/scheduler/Dockerfile"
+        "notification|${NOTIFICATION_IMAGE}:${MICROSERVICE_TAG}|${BUILD_CONTEXT}/services/notification/Dockerfile"
+    )
+
+    # Create a temp dir for parallel build logs (so output stays clean)
+    BUILD_LOGS_DIR=$(mktemp -d)
+
+    write_info "Launching ${#BUILDS[@]} parallel Docker builds..."
+
+    # Launch all builds as background jobs
+    PIDS=()
+    for build in "${BUILDS[@]}"; do
+        IFS='|' read -r build_name build_tag build_dockerfile <<< "$build"
+        write_info "  Starting: $build_name ($build_tag)"
+
+        (
+            minikube image build -t "$build_tag" \
+                -f "$build_dockerfile" "$BUILD_CONTEXT" \
+                > "$BUILD_LOGS_DIR/${build_name}.log" 2>&1
+        ) &
+        PIDS+=($!)
+    done
+
+    # Wait for all builds to complete and collect results
+    BUILD_FAILED=false
+    for i in "${!BUILDS[@]}"; do
+        IFS='|' read -r build_name build_tag build_dockerfile <<< "${BUILDS[$i]}"
+
+        if ! wait "${PIDS[$i]}"; then
+            write_err "$build_name build FAILED"
+            write_info "  Last 10 lines of build log:"
+            tail -10 "$BUILD_LOGS_DIR/${build_name}.log" | sed 's/^/    /'
+            BUILD_FAILED=true
+        else
+            write_ok "Image built: $build_tag"
+        fi
+    done
+
+    # Clean up temp logs
+    rm -rf "$BUILD_LOGS_DIR"
+
+    if [[ "$BUILD_FAILED" == true ]]; then
+        write_err "One or more Docker builds failed. Aborting."
+        exit 1
+    fi
+
+    write_ok "All ${#BUILDS[@]} images built successfully (parallel)"
 fi
-write_ok "Image built: ${NOTIFICATION_IMAGE}:${MICROSERVICE_TAG}"
 
 # ============================================================================
 # Step 6: Deploy task-manager + Microservices via Helm
@@ -351,7 +424,11 @@ if kubectl get crd servicemonitors.monitoring.coreos.com >/dev/null 2>&1; then
     HAS_MONITORING_CRD=true
 fi
 
-if [[ "$HAS_MONITORING_CRD" == true ]]; then
+if [[ "$SKIP_MONITORING" == true ]]; then
+    # User explicitly skipped monitoring — deploy with monitoring OFF regardless.
+    write_info "Monitoring skipped (--skip-monitoring flag) — deploying with monitoring disabled"
+    MONITORING_FLAG=false
+elif [[ "$HAS_MONITORING_CRD" == true ]]; then
     # Monitoring stack already installed — deploy with monitoring ON directly.
     # This skips the disable/enable dance of Steps 7-8 below.
     write_info "Monitoring CRD detected — deploying with monitoring enabled"
@@ -468,13 +545,15 @@ else
 fi
 
 # ============================================================================
-# Step 7: Install kube-prometheus-stack (Monitoring) — fresh cluster only
+# Step 7: Install kube-prometheus-stack (Monitoring)
 # ============================================================================
 
-# This step only runs on a fresh cluster where the monitoring CRD doesn't
-# exist yet. On subsequent runs with --skip-recreate, the CRD already exists
-# and Step 6 already deployed task-manager with monitoring enabled.
-if [[ "$HAS_MONITORING_CRD" == true ]]; then
+# Skipped entirely when --skip-monitoring is passed.
+# Also skipped on existing clusters where the monitoring CRD already exists.
+if [[ "$SKIP_MONITORING" == true ]]; then
+    write_step "Step 7: Install Monitoring Stack (SKIPPED — --skip-monitoring)"
+    write_ok "Monitoring stack skipped by flag"
+elif [[ "$HAS_MONITORING_CRD" == true ]]; then
     write_step "Step 7: Install Monitoring Stack (skipped — already installed)"
     write_ok "Monitoring stack detected from previous run"
 else
@@ -516,30 +595,36 @@ else
     write_ok "Monitoring stack installed"
 fi
 
-# Wait for all monitoring pods to be Running.
-# Prometheus is the critical one — the operator and Grafana depend on it.
-# This wait runs regardless of whether we just installed or already had it,
-# to ensure Prometheus is ready before Step 8 tries to create a ServiceMonitor.
-write_info "Waiting for Prometheus pod to be ready..."
-kubectl wait --namespace "$MONITORING_NAMESPACE" \
-    --for=condition=ready pod \
-    --selector=app.kubernetes.io/name=prometheus \
-    --timeout=300s >/dev/null 2>&1
+# Wait for Prometheus pod only when monitoring is active.
+# Skipped with --skip-monitoring to save time.
+if [[ "$SKIP_MONITORING" != true ]]; then
+    # Wait for all monitoring pods to be Running.
+    # Prometheus is the critical one — the operator and Grafana depend on it.
+    # This wait runs regardless of whether we just installed or already had it,
+    # to ensure Prometheus is ready before Step 8 tries to create a ServiceMonitor.
+    write_info "Waiting for Prometheus pod to be ready..."
+    kubectl wait --namespace "$MONITORING_NAMESPACE" \
+        --for=condition=ready pod \
+        --selector=app.kubernetes.io/name=prometheus \
+        --timeout=300s >/dev/null 2>&1
 
-if [[ $? -ne 0 ]]; then
-    write_err "Prometheus pod did not become ready in time"
-    write_info "Check pod status: kubectl get pods -n $MONITORING_NAMESPACE"
-    exit 1
+    if [[ $? -ne 0 ]]; then
+        write_err "Prometheus pod did not become ready in time"
+        write_info "Check pod status: kubectl get pods -n $MONITORING_NAMESPACE"
+        exit 1
+    fi
+    write_ok "Prometheus is running"
 fi
-write_ok "Prometheus is running"
 
 # ============================================================================
-# Step 8: Upgrade task-manager with Monitoring Enabled — fresh cluster only
+# Step 8: Upgrade task-manager with Monitoring Enabled
 # ============================================================================
 
-# This step only runs on a fresh cluster. On subsequent runs, Step 6 already
-# deployed with monitoring enabled.
-if [[ "$HAS_MONITORING_CRD" == true ]]; then
+# Skipped when --skip-monitoring or when monitoring was already enabled in Step 6.
+if [[ "$SKIP_MONITORING" == true ]]; then
+    write_step "Step 8: Enable Monitoring for task-manager (SKIPPED — --skip-monitoring)"
+    write_ok "Monitoring intentionally disabled"
+elif [[ "$HAS_MONITORING_CRD" == true ]]; then
     write_step "Step 8: Enable Monitoring for task-manager (skipped — already enabled)"
     write_ok "ServiceMonitor already active from Step 6"
 else
@@ -606,11 +691,15 @@ else
     write_err "Notification Service not found"
 fi
 
-# --- 9b: ServiceMonitor created ---
-if kubectl get servicemonitor -n "$APP_NAMESPACE" 2>/dev/null | grep -q "task-manager"; then
-    write_ok "ServiceMonitor created"
+# --- 9b: ServiceMonitor created (skip if monitoring disabled) ---
+if [[ "$SKIP_MONITORING" != true ]]; then
+    if kubectl get servicemonitor -n "$APP_NAMESPACE" 2>/dev/null | grep -q "task-manager"; then
+        write_ok "ServiceMonitor created"
+    else
+        write_err "ServiceMonitor not found"
+    fi
 else
-    write_err "ServiceMonitor not found"
+    write_info "ServiceMonitor check skipped (--skip-monitoring)"
 fi
 
 # --- 9c: Metrics endpoint responding ---
@@ -627,52 +716,56 @@ else
     write_err "Metrics endpoint not responding correctly"
 fi
 
-# --- 9d: Prometheus scraping task-manager ---
-# Check that Prometheus has discovered our ServiceMonitor and is actively
-# scraping the /api/metrics endpoint. We port-forward Prometheus to localhost
-# temporarily and query its targets API.
-write_info "Checking if Prometheus is scraping task-manager..."
+# --- 9d: Prometheus scraping task-manager (skip if monitoring disabled) ---
+if [[ "$SKIP_MONITORING" != true ]]; then
+    # Check that Prometheus has discovered our ServiceMonitor and is actively
+    # scraping the /api/metrics endpoint. We port-forward Prometheus to localhost
+    # temporarily and query its targets API.
+    write_info "Checking if Prometheus is scraping task-manager..."
 
-# Start a background port-forward to Prometheus (port 9090)
-kubectl port-forward -n "$MONITORING_NAMESPACE" \
-    svc/monitoring-kube-prometheus-prometheus 9090:9090 >/dev/null 2>&1 &
-PF_PID=$!
+    # Start a background port-forward to Prometheus (port 9090)
+    kubectl port-forward -n "$MONITORING_NAMESPACE" \
+        svc/monitoring-kube-prometheus-prometheus 9090:9090 >/dev/null 2>&1 &
+    PF_PID=$!
 
-sleep 3
+    sleep 3
 
-cleanup_port_forward() {
-    kill "$PF_PID" >/dev/null 2>&1 || true
-}
-trap cleanup_port_forward EXIT
+    cleanup_port_forward() {
+        kill "$PF_PID" >/dev/null 2>&1 || true
+    }
+    trap cleanup_port_forward EXIT
 
-# Query Prometheus targets API
-if command -v curl >/dev/null 2>&1; then
-    PROMETHEUS_RESPONSE=$(curl -s "http://localhost:9090/api/v1/targets" 2>/dev/null || echo "")
-else
-    PROMETHEUS_RESPONSE=$(wget -qO- "http://localhost:9090/api/v1/targets" 2>/dev/null || echo "")
-fi
+    # Query Prometheus targets API
+    if command -v curl >/dev/null 2>&1; then
+        PROMETHEUS_RESPONSE=$(curl -s "http://localhost:9090/api/v1/targets" 2>/dev/null || echo "")
+    else
+        PROMETHEUS_RESPONSE=$(wget -qO- "http://localhost:9090/api/v1/targets" 2>/dev/null || echo "")
+    fi
 
-if [[ -n "$PROMETHEUS_RESPONSE" ]]; then
-    # Check if any active target contains "task" in its scrapeUrl and has health "up"
-    TASK_UP=$(echo "$PROMETHEUS_RESPONSE" | grep -o '"scrapeUrl":"[^"]*task[^"]*"' || echo "")
-    TASK_HEALTH=$(echo "$PROMETHEUS_RESPONSE" | grep -o '"scrapeUrl":"[^"]*task[^"]*"' | head -1 | grep -o '"health":"[^"]*"' || echo "")
+    if [[ -n "$PROMETHEUS_RESPONSE" ]]; then
+        # Check if any active target contains "task" in its scrapeUrl and has health "up"
+        TASK_UP=$(echo "$PROMETHEUS_RESPONSE" | grep -o '"scrapeUrl":"[^"]*task[^"]*"' || echo "")
+        TASK_HEALTH=$(echo "$PROMETHEUS_RESPONSE" | grep -o '"scrapeUrl":"[^"]*task[^"]*"' | head -1 | grep -o '"health":"[^"]*"' || echo "")
 
-    if [[ -n "$TASK_UP" ]]; then
-        if echo "$TASK_HEALTH" | grep -q '"health":"up"'; then
-            write_ok "Prometheus target is UP"
+        if [[ -n "$TASK_UP" ]]; then
+            if echo "$TASK_HEALTH" | grep -q '"health":"up"'; then
+                write_ok "Prometheus target is UP"
+            else
+                write_info "Prometheus target found but health is: $TASK_HEALTH"
+                write_info "  (may take 15-30s for first scrape — re-check later)"
+            fi
         else
-            write_info "Prometheus target found but health is: $TASK_HEALTH"
-            write_info "  (may take 15-30s for first scrape — re-check later)"
+            write_info "Prometheus has not discovered the target yet"
+            write_info "  (ServiceMonitor discovery can take up to 30s — re-check later)"
         fi
     else
-        write_info "Prometheus has not discovered the target yet"
-        write_info "  (ServiceMonitor discovery can take up to 30s — re-check later)"
+        write_info "Could not query Prometheus API (port-forward may need more time)"
     fi
-else
-    write_info "Could not query Prometheus API (port-forward may need more time)"
-fi
 
-cleanup_port_forward
+    cleanup_port_forward
+else
+    write_info "Prometheus scraping check skipped (--skip-monitoring)"
+fi
 
 # --- 9e: Cluster resource overview ---
 write_info "Cluster pod count by namespace:"
@@ -687,7 +780,28 @@ done
 
 write_step "Setup Complete!"
 
-cat << 'EOF'
+if [[ "$SKIP_MONITORING" == true ]]; then
+    cat << 'EOF'
+  Cluster is ready (monitoring SKIPPED). Deployed services:
+
+    - Main app (Next.js)      : http://task-manager.local
+    - Scheduler (CronJob)     : runs every 5 min, creates tasks from recurring templates
+    - Notification (internal) : ClusterIP:3004, email + in-app notifications
+
+  Next steps:
+
+  1. Start minikube tunnel (REQUIRED for Ingress access):
+     Open a SEPARATE terminal and run:
+       minikube tunnel
+
+  2. Open the app in your browser:
+     http://task-manager.local
+     (requires hosts file entry: 127.0.0.1 task-manager.local)
+
+  3. To enable monitoring later, re-run without --skip-monitoring
+EOF
+else
+    cat << 'EOF'
   Cluster is ready. Deployed services:
 
     - Main app (Next.js)      : http://task-manager.local
@@ -714,11 +828,15 @@ cat << 'EOF'
 
    Ready for Phase 2: File Attachments (MinIO) -> Real-time (WebSocket)
 EOF
+fi
 
 echo ""
 echo -e "  \033[90mUsage:\033[0m"
-echo -e "    \033[90mFull teardown + rebuild:  ./setup-cluster.sh\033[0m"
-echo -e "    \033[90mReuse existing cluster:   ./setup-cluster.sh --skip-recreate\033[0m"
+echo -e "    \033[90mFull teardown + rebuild:       ./setup-cluster.sh\033[0m"
+echo -e "    \033[90mReuse existing cluster:        ./setup-cluster.sh --skip-recreate\033[0m"
+echo -e "    \033[90mSkip builds (code unchanged):  ./setup-cluster.sh --skip-recreate --skip-builds\033[0m"
+echo -e "    \033[90mSkip monitoring:               ./setup-cluster.sh --skip-recreate --skip-monitoring\033[0m"
+echo -e "    \033[90mFastest (just redeploy):       ./setup-cluster.sh --skip-recreate --skip-builds --skip-monitoring\033[0m"
 echo ""
 echo -e "  \033[90mTo tear down everything:\033[0m"
 echo -e "    \033[90mminikube delete\033[0m"
