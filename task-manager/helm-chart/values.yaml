@@ -101,6 +101,37 @@ fileService:
       cpu: 100m
       memory: 128Mi
 
+meilisearch:
+  enabled: false
+  image:
+    repository: getmeili/meilisearch
+    pullPolicy: IfNotPresent
+    tag: v1.6
+  persistence:
+    size: 5Gi
+  masterKey: "meili-master-key-change-me"
+  resources:
+    limits:
+      cpu: 250m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+
+searchSync:
+  enabled: false
+  image:
+    repository: ralf090102/search-sync-service
+    pullPolicy: IfNotPresent
+    tag: latest
+  resources:
+    limits:
+      cpu: 250m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
 monitoring:
   enabled: true
   serviceMonitor:

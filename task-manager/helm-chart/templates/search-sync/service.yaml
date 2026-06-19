@@ -1,0 +1,18 @@
+{{- if .Values.searchSync.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "task-manager.fullname" . }}-search-sync
+  labels:
+    {{- include "task-manager.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: 3006
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "task-manager.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: search-sync
+{{- end }}

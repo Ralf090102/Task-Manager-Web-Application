@@ -1,0 +1,63 @@
+{{- if .Values.searchSync.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "task-manager.fullname" . }}-search-sync
+  labels:
+    {{- include "task-manager.labels" . | nindent 4 }}
+    app.kubernetes.io/component: search-sync
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "task-manager.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: search-sync
+  template:
+    metadata:
+      labels:
+        {{- include "task-manager.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: search-sync
+    spec:
+      initContainers:
+        - name: wait-for-meilisearch
+          image: busybox:1.35
+          command:
+            - sh
+            - -c
+            - 'until wget -q -O /dev/null http://{{ include "task-manager.fullname" . }}-meilisearch:7700/health; do echo "waiting for meilisearch"; sleep 2; done'
+      containers:
+        - name: search-sync
+          image: "{{ .Values.searchSync.image.repository }}:{{ .Values.searchSync.image.tag }}"
+          imagePullPolicy: {{ .Values.searchSync.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 3006
+              protocol: TCP
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "task-manager.fullname" . }}-secrets
+                  key: database-url
+            - name: MEILI_URL
+              value: "http://{{ include "task-manager.fullname" . }}-meilisearch:7700"
+            - name: MEILI_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "task-manager.fullname" . }}-meilisearch-secret
+                  key: masterKey
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.searchSync.resources | nindent 12 }}
+{{- end }}

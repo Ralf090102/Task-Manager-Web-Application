@@ -44,6 +44,15 @@ spec:
                 secretKeyRef:
                   name: {{ include "task-manager.fullname" . }}-secrets
                   key: auth-trust-host
+            {{- if .Values.meilisearch.enabled }}
+            - name: MEILI_URL
+              value: "http://{{ include "task-manager.fullname" . }}-meilisearch:7700"
+            - name: MEILI_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "task-manager.fullname" . }}-meilisearch-secret
+                  key: masterKey
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /
