@@ -22,6 +22,13 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function configureIndex(attempt = 1): Promise<void> {
   try {
+    try {
+      const task = await meili.createIndex(INDEX_NAME, { primaryKey: "id" });
+      await index.waitForTask(task.taskUid, { timeOutMs: 5000 });
+      app.log.info("[search-sync] Index created with primaryKey: id");
+    } catch {
+      app.log.info("[search-sync] Index already exists — skipping creation");
+    }
     await index.updateSearchableAttributes(["title", "description"]);
     await index.updateFilterableAttributes(["status", "priority", "userId"]);
     app.log.info("[search-sync] Index configured (searchable + filterable attributes)");
@@ -48,18 +55,21 @@ app.post("/sync/task", async (req, reply) => {
     return reply.code(400).send({ error: "Task body with id is required" });
   }
 
-  await index.addDocuments([
-    {
-      id: task.id,
-      title: task.title,
-      description: task.description || "",
-      status: task.status,
-      priority: task.priority,
-      userId: task.userId,
-      dueDate: task.dueDate,
-      createdAt: task.createdAt,
-    },
-  ]);
+  await index.addDocuments(
+    [
+      {
+        id: task.id,
+        title: task.title,
+        description: task.description || "",
+        status: task.status,
+        priority: task.priority,
+        userId: task.userId,
+        dueDate: task.dueDate,
+        createdAt: task.createdAt,
+      },
+    ],
+    { primaryKey: "id" }
+  );
 
   app.log.info({ taskId: task.id }, "[search-sync] Task indexed");
   return { indexed: true };
@@ -86,7 +96,8 @@ app.post("/sync/all", async () => {
         userId: t.userId,
         dueDate: t.dueDate,
         createdAt: t.createdAt,
-      }))
+      })),
+      { primaryKey: "id" }
     );
   }
 
