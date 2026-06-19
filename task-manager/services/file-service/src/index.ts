@@ -34,17 +34,31 @@ await app.register(multipart, {
   limits: { fileSize: 50 * 1024 * 1024 },
 });
 
-async function ensureBucket() {
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function ensureBucket(attempt = 1): Promise<void> {
   try {
     await s3.send(new HeadBucketCommand({ Bucket: BUCKET_NAME }));
     app.log.info(`[file-service] Bucket "${BUCKET_NAME}" already exists`);
+    return;
   } catch {
-    try {
-      await s3.send(new CreateBucketCommand({ Bucket: BUCKET_NAME }));
-      app.log.info(`[file-service] Created bucket "${BUCKET_NAME}"`);
-    } catch (err) {
-      app.log.error({ err }, `[file-service] Failed to create bucket`);
+    // Bucket doesn't exist (or MinIO unreachable) — try to create it
+  }
+
+  try {
+    await s3.send(new CreateBucketCommand({ Bucket: BUCKET_NAME }));
+    app.log.info(`[file-service] Created bucket "${BUCKET_NAME}"`);
+  } catch (err) {
+    if (attempt < 5) {
+      const delay = 1000 * Math.pow(2, attempt);
+      app.log.warn(
+        { err, attempt, delay },
+        `[file-service] Bucket creation failed, retrying...`
+      );
+      await sleep(delay);
+      return ensureBucket(attempt + 1);
     }
+    app.log.error({ err }, `[file-service] Failed to create bucket after ${attempt} attempts`);
   }
 }
 
@@ -105,12 +119,14 @@ app.get("/download/:id", async (req, reply) => {
     })
   );
 
+  const bytes = await response.Body!.transformToByteArray();
+
   reply.header("Content-Type", attachment.mimeType);
   reply.header(
     "Content-Disposition",
     `attachment; filename="${attachment.filename}"`
   );
-  return reply.send(response.body);
+  return reply.send(Buffer.from(bytes));
 });
 
 app.get("/attachments/:taskId", async (req) => {

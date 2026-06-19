@@ -18,6 +18,13 @@ spec:
         {{- include "task-manager.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: file-service
     spec:
+      initContainers:
+        - name: wait-for-minio
+          image: busybox:1.35
+          command:
+            - sh
+            - -c
+            - 'until wget -q -O /dev/null http://{{ include "task-manager.fullname" . }}-minio:9000/minio/health/live; do echo "waiting for minio"; sleep 2; done'
       containers:
         - name: file-service
           image: "{{ .Values.fileService.image.repository }}:{{ .Values.fileService.image.tag }}"
