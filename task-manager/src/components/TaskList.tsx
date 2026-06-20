@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
+import { io } from "socket.io-client";
 import TaskCard from "./TaskCard";
 import TaskForm from "./TaskForm";
 
@@ -24,6 +25,7 @@ export default function TaskList({ initialTasks }: TaskListProps) {
   const [tasks, setTasks] = useState<Task[]>(initialTasks);
   const [filter, setFilter] = useState<FilterStatus>("ALL");
   const [showForm, setShowForm] = useState(false);
+  const [live, setLive] = useState(false);
 
   const refreshTasks = useCallback(async () => {
     try {
@@ -35,6 +37,40 @@ export default function TaskList({ initialTasks }: TaskListProps) {
     } catch {
       /* ignore */
     }
+  }, []);
+
+  const refreshRef = useRef(refreshTasks);
+
+  useEffect(() => {
+    refreshRef.current = refreshTasks;
+  }, [refreshTasks]);
+
+  useEffect(() => {
+    let socket: ReturnType<typeof io> | null = null;
+
+    async function connect() {
+      try {
+        const res = await fetch("/api/ws-token");
+        if (!res.ok) return;
+        const { token } = await res.json();
+
+        socket = io({ path: "/socket.io/", auth: { token } });
+
+        socket.on("connect", () => setLive(true));
+        socket.on("disconnect", () => setLive(false));
+        socket.on("task:created", () => refreshRef.current());
+        socket.on("task:updated", () => refreshRef.current());
+        socket.on("task:deleted", () => refreshRef.current());
+      } catch {
+        /* real-time is optional */
+      }
+    }
+
+    connect();
+
+    return () => {
+      socket?.disconnect();
+    };
   }, []);
 
   async function handleCreate(data: {
@@ -88,9 +124,17 @@ export default function TaskList({ initialTasks }: TaskListProps) {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h2 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">
-          Tasks
-        </h2>
+        <div className="flex items-center gap-2">
+          <h2 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">
+            Tasks
+          </h2>
+          {live && (
+            <span className="flex items-center gap-1 rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700 dark:bg-green-900/30 dark:text-green-400">
+              <span className="h-1.5 w-1.5 rounded-full bg-green-500" />
+              Live
+            </span>
+          )}
+        </div>
         <button
           onClick={() => setShowForm(!showForm)}
           className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-zinc-100 transition-colors hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
