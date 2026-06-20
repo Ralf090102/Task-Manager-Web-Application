@@ -1,0 +1,51 @@
+{{- if .Values.realtime.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "task-manager.fullname" . }}-realtime
+  labels:
+    {{- include "task-manager.labels" . | nindent 4 }}
+    app.kubernetes.io/component: realtime
+spec:
+  replicas: {{ .Values.realtime.replicaCount | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "task-manager.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: realtime
+  template:
+    metadata:
+      labels:
+        {{- include "task-manager.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: realtime
+    spec:
+      containers:
+        - name: realtime
+          image: "{{ .Values.realtime.image.repository }}:{{ .Values.realtime.image.tag }}"
+          imagePullPolicy: {{ .Values.realtime.image.pullPolicy }}
+          ports:
+            - name: ws
+              containerPort: 3001
+              protocol: TCP
+          env:
+            - name: CORS_ORIGIN
+              value: {{ .Values.realtime.corsOrigin | default "*" | quote }}
+            - name: NEXTAUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "task-manager.fullname" . }}-secrets
+                  key: nextauth-secret
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: ws
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: ws
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.realtime.resources | nindent 12 }}
+{{- end }}

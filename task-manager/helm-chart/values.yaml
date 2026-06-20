@@ -132,6 +132,22 @@ searchSync:
       cpu: 100m
       memory: 128Mi
 
+realtime:
+  enabled: false
+  replicaCount: 1
+  image:
+    repository: ralf090102/realtime-service
+    pullPolicy: IfNotPresent
+    tag: latest
+  corsOrigin: "http://task-manager.local"
+  resources:
+    limits:
+      cpu: 250m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
 monitoring:
   enabled: true
   serviceMonitor:

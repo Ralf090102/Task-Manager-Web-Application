@@ -5,6 +5,11 @@ metadata:
   name: {{ include "task-manager.fullname" . }}
   labels:
     {{- include "task-manager.labels" . | nindent 4 }}
+  {{- if .Values.realtime.enabled }}
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+  {{- end }}
 spec:
   ingressClassName: {{ .Values.ingress.className }}
   rules:
@@ -12,6 +17,15 @@ spec:
     - host: {{ .host | quote }}
       http:
         paths:
+          {{- if $.Values.realtime.enabled }}
+          - path: /socket.io
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "task-manager.fullname" $ }}-realtime
+                port:
+                  number: 3001
+          {{- end }}
           {{- range .paths }}
           - path: {{ .path }}
             pathType: {{ .pathType }}

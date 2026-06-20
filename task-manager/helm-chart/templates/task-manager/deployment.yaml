@@ -53,6 +53,10 @@ spec:
                   name: {{ include "task-manager.fullname" . }}-meilisearch-secret
                   key: masterKey
             {{- end }}
+            {{- if .Values.realtime.enabled }}
+            - name: REALTIME_URL
+              value: "http://{{ include "task-manager.fullname" . }}-realtime:3001"
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /
