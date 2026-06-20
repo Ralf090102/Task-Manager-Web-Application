@@ -4,6 +4,7 @@ import prisma from "@/lib/prisma";
 import { taskUpdateSchema } from "@/lib/validations";
 import { observeRequest, trackTaskOperation } from "@/lib/metrics";
 import logger from "@/lib/logger";
+import { emitToRealtime } from "@/lib/realtime";
 
 export async function GET(
   _req: Request,
@@ -79,6 +80,7 @@ export async function PUT(
     trackTaskOperation("update", "success");
     logger.info({ taskId: id, userId: session.user.id }, "Task updated");
     observeRequest("PUT", "/api/tasks/:id", 200, (Date.now() - start) / 1000);
+    emitToRealtime("task:updated", task);
     return NextResponse.json(task);
   } catch (err) {
     trackTaskOperation("update", "error");
@@ -118,6 +120,7 @@ export async function DELETE(
     trackTaskOperation("delete", "success");
     logger.info({ taskId: id, userId: session.user.id }, "Task deleted");
     observeRequest("DELETE", "/api/tasks/:id", 200, (Date.now() - start) / 1000);
+    emitToRealtime("task:deleted", { id });
     return NextResponse.json({ success: true });
   } catch (err) {
     trackTaskOperation("delete", "error");
