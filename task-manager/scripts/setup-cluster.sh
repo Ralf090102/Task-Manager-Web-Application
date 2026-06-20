@@ -93,6 +93,7 @@ SCHEDULER_IMAGE="ralf090102/scheduler-service"
 NOTIFICATION_IMAGE="ralf090102/notification-service"
 FILE_SERVICE_IMAGE="ralf090102/file-service"
 SEARCH_SYNC_IMAGE="ralf090102/search-sync-service"
+REALTIME_IMAGE="ralf090102/realtime-service"
 MINIO_IMAGE="minio/minio"
 MEILISEARCH_IMAGE="getmeili/meilisearch"
 MEILISEARCH_TAG="v1.6"
@@ -342,6 +343,7 @@ if [[ "$SKIP_BUILDS" == true ]]; then
                "${NOTIFICATION_IMAGE}:${MICROSERVICE_TAG}" \
                "${FILE_SERVICE_IMAGE}:${MICROSERVICE_TAG}" \
                "${SEARCH_SYNC_IMAGE}:${MICROSERVICE_TAG}" \
+               "${REALTIME_IMAGE}:${MICROSERVICE_TAG}" \
                "${MINIO_IMAGE}:${MICROSERVICE_TAG}" \
                "${MEILISEARCH_IMAGE}:${MEILISEARCH_TAG}"; do
         if ! minikube image ls --format "{{.Repository}}:{{.Tag}}" 2>/dev/null | grep -q "$img"; then
@@ -377,6 +379,7 @@ else
         "notification|${NOTIFICATION_IMAGE}:${MICROSERVICE_TAG}|${BUILD_CONTEXT}/services/notification/Dockerfile"
         "file-service|${FILE_SERVICE_IMAGE}:${MICROSERVICE_TAG}|${BUILD_CONTEXT}/services/file-service/Dockerfile"
         "search-sync|${SEARCH_SYNC_IMAGE}:${MICROSERVICE_TAG}|${BUILD_CONTEXT}/services/search-sync/Dockerfile"
+        "realtime|${REALTIME_IMAGE}:${MICROSERVICE_TAG}|${BUILD_CONTEXT}/services/realtime/Dockerfile"
     )
 
     # Create a temp dir for parallel build logs (so output stays clean)
@@ -584,7 +587,16 @@ helm upgrade --install "$APP_RELEASE" \
     --set searchSync.resources.limits.cpu=250m \
     --set searchSync.resources.limits.memory=256Mi \
     --set searchSync.resources.requests.cpu=100m \
-    --set searchSync.resources.requests.memory=128Mi >/dev/null 2>&1
+    --set searchSync.resources.requests.memory=128Mi \
+    --set realtime.enabled=true \
+    --set realtime.image.repository="${REALTIME_IMAGE}" \
+    --set realtime.image.tag="${MICROSERVICE_TAG}" \
+    --set realtime.image.pullPolicy=Never \
+    --set realtime.corsOrigin="http://task-manager.local" \
+    --set realtime.resources.limits.cpu=250m \
+    --set realtime.resources.limits.memory=256Mi \
+    --set realtime.resources.requests.cpu=100m \
+    --set realtime.resources.requests.memory=128Mi >/dev/null 2>&1
 
 if [[ $? -ne 0 ]]; then
     write_err "Helm deploy failed"
@@ -726,6 +738,31 @@ if echo "$SYNC_HEALTH" | grep -q "ok"; then
     write_ok "Search sync service is healthy"
 else
     write_err "Search sync service health check failed"
+fi
+
+# Wait for realtime pod to be ready.
+write_info "Waiting for realtime pod to be ready..."
+kubectl wait --namespace "$APP_NAMESPACE" \
+    --for=condition=ready pod \
+    --selector="app.kubernetes.io/component=realtime" \
+    --timeout=120s >/dev/null 2>&1
+
+if [[ $? -ne 0 ]]; then
+    write_err "realtime pod did not become ready"
+    write_info "Check: kubectl logs -n $APP_NAMESPACE -l app.kubernetes.io/component=realtime -c realtime"
+    exit 1
+fi
+write_ok "realtime pod is running"
+
+# Verify the realtime health endpoint.
+write_info "Testing realtime service health endpoint..."
+RT_HEALTH=$(kubectl exec -n "$APP_NAMESPACE" deployment/"$APP_RELEASE" \
+    -- node -e "fetch('http://${APP_RELEASE}-realtime:3001/health').then(r=>r.text()).then(t=>console.log(t))" 2>/dev/null || echo "")
+
+if echo "$RT_HEALTH" | grep -q "ok"; then
+    write_ok "Realtime service is healthy"
+else
+    write_err "Realtime service health check failed"
 fi
 
 # ============================================================================

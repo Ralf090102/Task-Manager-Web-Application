@@ -383,6 +383,61 @@ Expanding the monolith into a microservices architecture. 8 planned modules acro
   kubectl exec deployment/task-manager -n task-manager -- node -e "eval(Buffer.from('$encoded','base64').toString())"
   ```
 
+### Module 4: Real-time WebSocket Gateway (Phase 3)
+
+- **Service**: `services/realtime/` — Node.js Socket.io WebSocket gateway
+- **Purpose**: Live task board updates, real-time notifications push
+- **Runtime**: `tsx` (same pattern as other services)
+- **Port**: 3001 (ClusterIP with sessionAffinity — no separate Ingress, routes through main Ingress via `/socket.io` path)
+- **No database access**: Pure WebSocket relay — no Prisma, no PostgreSQL
+- **JWT auth**: Decrypts NextAuth JWT (`jose.jwtDecrypt`) using shared `NEXTAUTH_SECRET`; extracts `userId` for room routing
+- **Endpoints**: `GET /health` (returns connection count), `POST /emit` (internal — main app pushes events)
+- **Socket events**: `task:created`, `task:updated`, `task:deleted` (broadcast to `board` room), `presence:online`/`presence:offline`
+- **Session affinity**: `sessionAffinity: ClientIP` on Service (sticky sessions — WebSocket connections must persist on one pod)
+- **NGINX Ingress**: `/socket.io` path routes to realtime service; WebSocket annotations (`proxy-read-timeout: 3600`, `proxy-send-timeout: 3600`) added when realtime is enabled
+- **Main app integration**:
+  - `src/lib/realtime.ts` — `emitToRealtime()` helper (fire-and-forget POST to `/emit`)
+  - `src/app/api/ws-token/route.ts` — returns NextAuth JWT cookie for frontend Socket.io auth
+  - Task API routes emit events after mutations (create/update/delete)
+  - `src/components/TaskList.tsx` — Socket.io client listener, refreshes tasks on events, shows "Live" badge
+- **Frontend**: `socket.io-client` connects to same origin (Ingress routes `/socket.io/` to realtime pod), auth token from `/api/ws-token`
+- **Helm templates**: `templates/realtime/` — Deployment, Service (ClusterIP with sessionAffinity)
+- **values.yaml**: `realtime:` section with `enabled`, `replicaCount`, `image`, `corsOrigin`, `resources`
+- **Image**: `ralf090102/realtime-service:latest`
+- **Build context**: `task-manager/` (same as other services)
+- **Deploy commands**:
+  ```bash
+  # Build realtime image (from task-manager/, Docker Desktop)
+  docker build -t ralf090102/realtime-service:latest -f services/realtime/Dockerfile .
+  minikube image load ralf090102/realtime-service:latest
+
+  # Helm upgrade with realtime enabled
+  # NOTE: --reuse-values does NOT read new values.yaml keys!
+  # Must pass ALL realtime.* values via --set on first deploy:
+  helm upgrade task-manager ./task-manager/helm-chart --namespace task-manager \
+    --reuse-values \
+    --set realtime.enabled=true \
+    --set realtime.image.repository=ralf090102/realtime-service \
+    --set realtime.image.tag=latest \
+    --set realtime.image.pullPolicy=Never \
+    --set realtime.corsOrigin=http://task-manager.local \
+    --set realtime.resources.limits.cpu=250m \
+    --set realtime.resources.limits.memory=256Mi \
+    --set realtime.resources.requests.cpu=100m \
+    --set realtime.resources.requests.memory=128Mi
+
+  # Subsequent upgrades only need --reuse-values:
+  helm upgrade task-manager ./task-manager/helm-chart --namespace task-manager --reuse-values
+
+  # Test health endpoint:
+  kubectl exec deployment/task-manager -n task-manager -- node -e "fetch('http://task-manager-realtime:3001/health').then(r=>r.json()).then(j=>console.log(j))"
+  # Expected: {"status":"ok","connections":0}
+
+  # Test /emit endpoint (internal):
+  kubectl exec deployment/task-manager -n task-manager -- node -e "fetch('http://task-manager-realtime:3001/emit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({event:'test:event',room:'board',data:{hello:'world'}})}).then(r=>r.json()).then(j=>console.log(j))"
+  # Expected: {"emitted":true,"event":"test:event","room":"board"}
+  ```
+
 ### Service Selector Labels (Critical)
 
 The main app Deployment and Service MUST have `app.kubernetes.io/component: app` in their labels/selectors. Without it, the main app Service selector (`app.kubernetes.io/name=task-manager` + `app.kubernetes.io/instance=task-manager`) matches ALL pods with those base labels — including notification pods. This causes traffic to be load-balanced across both pods (Fastify returns 404 for Next.js routes like `/dashboard`).
@@ -394,6 +449,7 @@ The main app Deployment and Service MUST have `app.kubernetes.io/component: app`
 - MinIO: `app.kubernetes.io/component: minio`
 - Meilisearch: `app.kubernetes.io/component: meilisearch`
 - Search sync: `app.kubernetes.io/component: search-sync`
+- Realtime: `app.kubernetes.io/component: realtime`
 - Scheduler: N/A (CronJob, no Service)
 
 ### Microservice Pattern (reusable for future services)
@@ -403,12 +459,14 @@ Each Node.js microservice follows this structure:
 services/<name>/
 ├── package.json          # "type": "module", tsx as dependency
 ├── tsconfig.json         # moduleResolution: "bundler", noEmit: true
-├── prisma.config.ts      # Minimal config pointing to shared schema
-├── src/index.ts          # imports from ./generated/prisma/client.ts
+├── prisma.config.ts      # Minimal config pointing to shared schema (omit if no DB access)
+├── src/index.ts          # imports from ./generated/prisma/client.ts (omit if no DB access)
 ├── scripts/test.ts       # Debug/test commands (run via npx tsx in pod)
-├── Dockerfile            # copies shared schema, runs prisma generate, uses tsx
+├── Dockerfile            # copies shared schema, runs prisma generate, uses tsx (omit prisma if no DB)
 └── .gitignore
 ```
+
+**Note**: Services that don't need database access (e.g., realtime service) omit `prisma.config.ts`, `src/generated/`, and the Prisma steps in the Dockerfile. The Dockerfile is simpler: base + builder (no prisma generate) + runner.
 
 ### Helm Chart Structure (multi-service)
 
@@ -422,7 +480,8 @@ helm-chart/templates/
 ├── minio/                    # MinIO (statefulset, headless-service, service, secret)
 ├── file-service/             # File service (deployment with initContainer, service)
 ├── search/                   # Meilisearch (statefulset, headless-service, service, secret)
-└── search-sync/              # Search sync (deployment with initContainer, service)
+├── search-sync/              # Search sync (deployment with initContainer, service)
+└── realtime/                 # Realtime WebSocket (deployment, service with sessionAffinity)
 ```
 
 Each service has an `enabled` flag in `values.yaml` for conditional rendering.
