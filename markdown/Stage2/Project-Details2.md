@@ -1,6 +1,6 @@
 # Stage 2 - Phase 1 & 2 Learning Summary
 
-This document explains the core concepts and technologies implemented in Phases 1-2 of the Task Manager microservices expansion. It covers Module 7 (Recurring Task Scheduler), Module 1 (Notification Service), and Module 2 (File Service + MinIO). Each section includes real examples from your codebase.
+This document explains the core concepts and technologies implemented in Phases 1-2 of the Task Manager microservices expansion. It covers Module 7 (Recurring Task Scheduler), Module 1 (Notification Service), Module 2 (File Service + MinIO), and Module 5 (Search Sync + Meilisearch). Each section includes real examples from your codebase.
 
 ---
 
@@ -32,7 +32,7 @@ This document explains the core concepts and technologies implemented in Phases 
 22. [Key Patterns and Best Practices](#key-patterns-and-best-practices)
 23. [Troubleshooting](#troubleshooting)
 
-### Phase 2: File Service + MinIO
+### Phase 2: File Service + MinIO + Meilisearch
 
 24. [Kubernetes StatefulSet](#kubernetes-statefulset)
 25. [PersistentVolumeClaims and volumeClaimTemplates](#persistentvolumeclaims-and-volumeclaimtemplates)
@@ -46,8 +46,15 @@ This document explains the core concepts and technologies implemented in Phases 
 33. [The `minikube image load` Workflow](#the-minikube-image-load-workflow)
 34. [File Service API Design](#file-service-api-design)
 35. [AWS SDK v3 Response Body Handling](#aws-sdk-v3-response-body-handling)
-36. [Phase 2 Key Patterns and Best Practices](#phase-2-key-patterns-and-best-practices)
-37. [Phase 2 Troubleshooting](#phase-2-troubleshooting)
+36. [Meilisearch: Full-Text Search Engine](#meilisearch-full-text-search-engine)
+37. [Meilisearch JavaScript Client](#meilisearch-javascript-client)
+38. [Search Sync Service Architecture](#search-sync-service-architecture)
+39. [Primary Key Inference Bug](#primary-key-inference-bug)
+40. [Searchable vs Filterable Attributes](#searchable-vs-filterable-attributes)
+41. [Bulk Reindex vs Incremental Sync](#bulk-reindex-vs-incremental-sync)
+42. [Main App Search Endpoint Design](#main-app-search-endpoint-design)
+43. [Phase 2 Key Patterns and Best Practices](#phase-2-key-patterns-and-best-practices)
+44. [Phase 2 Troubleshooting](#phase-2-troubleshooting)
 
 ---
 
@@ -67,7 +74,7 @@ task-manager/
 │   ├── file-service/              # Module 2 (implemented)
 │   ├── analytics/                 # Module 3 (future)
 │   ├── realtime/                  # Module 4 (future)
-│   ├── search-sync/               # Module 5 (future)
+│   ├── search-sync/               # Module 5 (implemented)
 │   ├── webhook/                   # Module 6 (future)
 │   ├── scheduler/                 # Module 7 (implemented)
 │   └── team-service/              # Module 8 (future)
@@ -1624,22 +1631,21 @@ kubectl exec deployment/task-manager -n task-manager -- \
 
 ---
 
-## Next Steps: Phase 2
+## Next Steps: Phase 3
 
-In Phase 2, you'll learn:
-- StatefulSet for persistent storage (MinIO, Meilisearch)
-- Headless Services for direct pod access
-- File upload/download microservice
-- S3-compatible object storage (MinIO)
-- Full-text search indexing (Meilisearch)
+In Phase 3, you'll learn:
+- WebSocket service with sticky sessions (Module 4)
+- Python microservice (Module 3)
+- Background worker pattern with retry logic (Module 6)
+- Cross-service event emission
 
-This will expand the architecture with stateful workloads and data-heavy services.
+This will expand the architecture with real-time communication and polyglot services.
 
 ---
 
 # Stage 2 - Phase 2 Learning Summary
 
-Phase 2 introduces **stateful workloads** — services that own persistent data and require stable identity. This is a fundamental shift from Phase 1's stateless Deployments.
+Phase 2 introduces **stateful workloads** — services that own persistent data and require stable identity. This includes MinIO (S3-compatible object storage for file attachments) and Meilisearch (full-text search engine for task search). Both use StatefulSets with persistent volumes.
 
 ---
 
@@ -1657,8 +1663,15 @@ Phase 2 introduces **stateful workloads** — services that own persistent data 
 33. [The `minikube image load` Workflow](#the-minikube-image-load-workflow)
 34. [File Service API Design](#file-service-api-design)
 35. [AWS SDK v3 Response Body Handling](#aws-sdk-v3-response-body-handling)
-36. [Phase 2 Key Patterns and Best Practices](#phase-2-key-patterns-and-best-practices)
-37. [Phase 2 Troubleshooting](#phase-2-troubleshooting)
+36. [Meilisearch: Full-Text Search Engine](#meilisearch-full-text-search-engine)
+37. [Meilisearch JavaScript Client](#meilisearch-javascript-client)
+38. [Search Sync Service Architecture](#search-sync-service-architecture)
+39. [Primary Key Inference Bug](#primary-key-inference-bug)
+40. [Searchable vs Filterable Attributes](#searchable-vs-filterable-attributes)
+41. [Bulk Reindex vs Incremental Sync](#bulk-reindex-vs-incremental-sync)
+42. [Main App Search Endpoint Design](#main-app-search-endpoint-design)
+43. [Phase 2 Key Patterns and Best Practices](#phase-2-key-patterns-and-best-practices)
+44. [Phase 2 Troubleshooting](#phase-2-troubleshooting)
 
 ---
 
@@ -2275,6 +2288,480 @@ AWS SDK v3 uses **capital `B`**: `response.Body`, not `response.body`. The lower
 
 ---
 
+## Meilisearch: Full-Text Search Engine
+
+### What Is Meilisearch?
+
+**Meilisearch** is an open-source, lightning-fast search engine. It provides typo-tolerant full-text search with near-instant results (<50ms). Unlike Elasticsearch (which is complex and resource-heavy), Meilisearch is a single binary that's easy to deploy.
+
+```
+User searches "lock" → Main app → Meilisearch → Returns matching tasks in <50ms
+```
+
+### Why Meilisearch Over PostgreSQL Full-Text Search?
+
+| Aspect | PostgreSQL FTS | Meilisearch |
+|--------|----------------|-------------|
+| Typo tolerance | Manual (fuzzy, trigrams) | Built-in (Levenshtein) |
+| Ranking/relevance | Manual (ts_rank) | Built-in (custom ranking rules) |
+| Speed on large datasets | Good (with GIN indexes) | Excellent (in-memory index) |
+| Setup complexity | Low (already have PG) | Medium (separate service) |
+| Index updates | Real-time (triggers) | Async (task queue) |
+
+For a task manager with thousands of tasks, Meilisearch provides significantly better search relevance and speed than PostgreSQL FTS.
+
+### Meilisearch Architecture in K8s
+
+```
+┌────────────────────────────────────────────────────────────┐
+│                    Kubernetes Cluster                       │
+│                                                             │
+│  Main app (Next.js)                                        │
+│  ├─ GET /api/tasks/search?q=... → queries Meilisearch     │
+│  │                                                          │
+│  └─ MEILI_URL=http://task-manager-meilisearch:7700         │
+│                                                             │
+│  search-sync pod                                           │
+│  ├─ POST /sync/all     → reads PostgreSQL, writes to Meili│
+│  ├─ POST /sync/task    → indexes single task (incremental)│
+│  └─ initContainer waits for Meilisearch health             │
+│                                                             │
+│  meilisearch-0 (StatefulSet)                               │
+│  ├─ Port 7700: Search API                                  │
+│  ├─ MEILI_ENV=production (requires master key)             │
+│  └─ /meili_data → PVC (5Gi persistent)                     │
+│                                                             │
+│  Services:                                                 │
+│  ├─ task-manager-meilisearch (ClusterIP, port 7700)       │
+│  └─ task-manager-meilisearch-headless (Headless)          │
+└────────────────────────────────────────────────────────────┘
+```
+
+### Production Mode and Master Key
+
+Meilisearch has two modes:
+- **Development** (`MEILI_ENV=development`): No master key required, all routes public
+- **Production** (`MEILI_ENV=production`): **Master key required** (min 16 bytes), generates derived API keys
+
+In Kubernetes, we run production mode for security. The master key is stored in a Kubernetes Secret:
+
+```yaml
+env:
+  - name: MEILI_MASTER_KEY
+    valueFrom:
+      secretKeyRef:
+        name: task-manager-meilisearch-secret
+        key: masterKey
+  - name: MEILI_ENV
+    value: production
+```
+
+All API requests must include `Authorization: Bearer <master-key>`.
+
+### Meilisearch Health Endpoint
+
+```
+GET /health → {"status":"available"}
+```
+
+Used by:
+- **Liveness/Readiness probes**: Restart or remove pod if unhealthy
+- **initContainer**: Block search-sync startup until Meilisearch is ready
+
+---
+
+## Meilisearch JavaScript Client
+
+### The `meilisearch` npm Package
+
+The official JS client provides a typed API for all Meilisearch operations:
+
+```typescript
+import { Meilisearch } from "meilisearch";
+
+const client = new Meilisearch({
+  host: process.env.MEILI_URL || "http://localhost:7700",
+  apiKey: process.env.MEILI_MASTER_KEY,
+});
+```
+
+**Note on class name**: The current package exports `Meilisearch` (lowercase 's'). The older export name `MeiliSearch` (capital 'S') was removed in recent versions. Always verify with:
+```bash
+node -e "const m = require('meilisearch'); console.log(typeof m.Meilisearch)"
+```
+
+### Key Operations
+
+| Operation | Method | Returns |
+|-----------|--------|---------|
+| Create index | `client.createIndex("tasks", { primaryKey: "id" })` | `EnqueuedTask` |
+| Add documents | `index.addDocuments(docs, { primaryKey: "id" })` | `EnqueuedTask` |
+| Search | `index.search("query", { filter: [...] })` | `SearchResult` |
+| Delete document | `index.deleteDocument(id)` | `EnqueuedTask` |
+| Update settings | `index.updateSearchableAttributes([...])` | `EnqueuedTask` |
+| Get stats | `index.getStats()` | `{ numberOfDocuments, ... }` |
+
+### Async Task Model
+
+Meilisearch operations are **asynchronous** — they return a task UID and are processed via an internal queue. The operation might not complete immediately:
+
+```typescript
+const task = await index.addDocuments(documents);
+console.log(task.taskUid); // e.g., 2
+// Documents may not be searchable YET — they're queued
+```
+
+This is why the `configureIndex` function on startup waits for tasks:
+
+```typescript
+const task = await meili.createIndex(INDEX_NAME, { primaryKey: "id" });
+await index.waitForTask(task.taskUid, { timeOutMs: 5000 });
+```
+
+`waitForTask` polls the task status until it completes (or times out).
+
+### Search with Filters
+
+```typescript
+const results = await index.search("lock", {
+  filter: ['status = "TODO"', 'userId = "abc123"'],
+  limit: 50,
+});
+```
+
+Meilisearch's filter syntax:
+- String values must be in **double quotes**: `status = "TODO"`
+- Numeric comparisons: `priority > 3`
+- AND: `status = "TODO" AND priority = "HIGH"`
+- Array of filters: `['status = "TODO"', 'userId = "abc"']` (implicit AND)
+
+---
+
+## Search Sync Service Architecture
+
+### The Sync Pattern
+
+The search-sync service bridges PostgreSQL (source of truth) and Meilisearch (search index). It runs as a Fastify HTTP server on port 3006.
+
+```
+PostgreSQL ──→ search-sync service ──→ Meilisearch index
+(source of truth)    (port 3006)          (search index)
+```
+
+### Why a Separate Sync Service?
+
+| Approach | Problem |
+|----------|---------|
+| Main app writes to both PG and Meilisearch | Couples search logic to every CRUD endpoint |
+| Main app queries Meilisearch directly | ✅ This is what we do (read side is simple) |
+| Separate sync service handles writes | ✅ Decouples sync logic, can be scaled independently |
+
+The search-sync service handles **writes** (indexing). The main app handles **reads** (searching). This separation means:
+- The main app doesn't need the meilisearch sync logic
+- The sync service can be restarted without affecting the main app
+- Bulk reindex can be triggered independently
+
+### Endpoints
+
+| Method | Route | Purpose |
+|--------|-------|---------|
+| `GET` | `/health` | Health check (liveness/readiness) |
+| `POST` | `/sync/task` | Index a single task (called after create/update) |
+| `DELETE` | `/sync/task/:id` | Remove a task from the index (called after delete) |
+| `POST` | `/sync/all` | Full reindex from PostgreSQL (initial sync or rebuild) |
+
+### Startup Configuration
+
+On startup, the service configures the Meilisearch index:
+
+```typescript
+async function configureIndex(attempt = 1): Promise<void> {
+  try {
+    // Create index with explicit primary key
+    try {
+      const task = await meili.createIndex(INDEX_NAME, { primaryKey: "id" });
+      await index.waitForTask(task.taskUid, { timeOutMs: 5000 });
+    } catch {
+      // Index already exists — skip
+    }
+
+    // Configure searchable and filterable attributes
+    await index.updateSearchableAttributes(["title", "description"]);
+    await index.updateFilterableAttributes(["status", "priority", "userId"]);
+  } catch (err) {
+    // Exponential backoff retry (same pattern as file-service bucket creation)
+  }
+}
+```
+
+This runs after the server starts listening, with the initContainer ensuring Meilisearch is already healthy.
+
+---
+
+## Primary Key Inference Bug
+
+### What Happened
+
+After the first bulk reindex (`POST /sync/all`), the index showed **0 documents** despite the response saying `{"reindexed": 3}`.
+
+### Diagnosis
+
+Checking the Meilisearch task queue revealed the document addition task had **failed**:
+
+```json
+{
+  "uid": 2,
+  "status": "failed",
+  "error": {
+    "message": "The primary key inference failed as the engine found 2 fields ending with `id` in their names: 'id' and 'userId'. Please specify the primary key manually using the `primaryKey` query parameter.",
+    "code": "index_primary_key_multiple_candidates_found"
+  }
+}
+```
+
+### Root Cause
+
+Meilisearch automatically infers the primary key by looking for fields ending with `id`. Our task documents have **two** such fields:
+
+```
+{ "id": "cmoh59n41...", "userId": "cmoh12ab3..." }
+     ↑                              ↑
+     candidate 1                   candidate 2
+```
+
+When multiple candidates exist, Meilisearch can't decide and fails the document addition.
+
+### The Fix: Explicit Primary Key
+
+Two places needed fixing:
+
+**1. Index creation** — Pass `primaryKey` when creating the index:
+
+```typescript
+await meili.createIndex("tasks", { primaryKey: "id" });
+```
+
+**2. Document addition** — Pass `primaryKey` as a safety net:
+
+```typescript
+await index.addDocuments(documents, { primaryKey: "id" });
+```
+
+After fixing, the existing broken index must be **deleted** (primary key can't be changed on an index with failed documents):
+
+```bash
+DELETE /indexes/tasks   # Remove broken index
+# Then restart search-sync to recreate it properly
+```
+
+### Lesson
+
+When your data model has multiple fields ending with "id" (common in relational schemas: `id`, `userId`, `taskId`, `categoryId`), **always** set the primary key explicitly. Don't rely on inference.
+
+---
+
+## Searchable vs Filterable Attributes
+
+### What Are Searchable Attributes?
+
+**Searchable** attributes are the fields Meilisearch indexes for full-text search. When a user types a query, Meilisearch searches these fields:
+
+```typescript
+await index.updateSearchableAttributes(["title", "description"]);
+```
+
+- User searches "meeting" → Meilisearch matches tasks where `title` or `description` contains "meeting"
+- Non-searchable fields (`id`, `userId`, `status`, `priority`, `dueDate`, `createdAt`) are **not** text-searched
+
+### What Are Filterable Attributes?
+
+**Filterable** attributes can be used in filter expressions. Meilisearch builds a filter index for these fields:
+
+```typescript
+await index.updateFilterableAttributes(["status", "priority", "userId"]);
+```
+
+- `filter: 'status = "TODO"'` → works (status is filterable)
+- `filter: 'title = "meeting"'` → **error** (title is not filterable)
+
+### Why Not Make Everything Both?
+
+Every filterable attribute adds overhead to the index (Meilisearch builds separate data structures for filtering). Making everything filterable wastes memory and slows down indexing. Only mark fields that users actually filter by:
+
+| Field | Searchable? | Filterable? | Why? |
+|-------|-------------|-------------|------|
+| `title` | ✅ | ❌ | Users search by text, not filter by exact title |
+| `description` | ✅ | ❌ | Same as title |
+| `status` | ❌ | ✅ | Users filter by status (TODO, COMPLETED), don't search "TODO" as text |
+| `priority` | ❌ | ✅ | Users filter by priority |
+| `userId` | ❌ | ✅ | **Security**: every search is scoped to the user's own tasks |
+| `id` | ❌ | ❌ | Primary key, not searched or filtered |
+
+### The `userId` Security Filter
+
+The most critical filterable attribute is `userId`. Every search query includes it:
+
+```typescript
+const filters = [`userId = "${session.user.id}"`];
+```
+
+This ensures users can **only see their own tasks** in search results. Without this filter, a search would return all users' tasks — a data leak.
+
+---
+
+## Bulk Reindex vs Incremental Sync
+
+### Two Sync Strategies
+
+| Strategy | Endpoint | When to Use |
+|----------|----------|-------------|
+| **Bulk reindex** | `POST /sync/all` | Initial setup, after schema changes, after data corruption |
+| **Incremental sync** | `POST /sync/task` | After each task create/update |
+| **Delete from index** | `DELETE /sync/task/:id` | After each task delete |
+
+### Bulk Reindex (`POST /sync/all`)
+
+Reads ALL tasks from PostgreSQL and adds them to the index in one operation:
+
+```typescript
+app.post("/sync/all", async () => {
+  const tasks = await prisma.task.findMany();
+  await index.addDocuments(
+    tasks.map((t) => ({
+      id: t.id, title: t.title, description: t.description || "",
+      status: t.status, priority: t.priority, userId: t.userId,
+      dueDate: t.dueDate, createdAt: t.createdAt,
+    })),
+    { primaryKey: "id" }
+  );
+  return { reindexed: tasks.length };
+});
+```
+
+**When to use**:
+- First deployment (empty index)
+- After Meilisearch data loss (PVC deleted)
+- Periodic consistency check
+
+**Cost**: For 1000 tasks, the operation takes ~1-2 seconds. For 1 million tasks, it could take minutes.
+
+### Incremental Sync (`POST /sync/task`)
+
+Indexes a single task. Intended to be called by the main app after task CRUD operations:
+
+```typescript
+app.post("/sync/task", async (req) => {
+  const task = req.body;
+  await index.addDocuments([{ ...task }], { primaryKey: "id" });
+  return { indexed: true };
+});
+```
+
+**Future integration**: The main app's task CRUD endpoints (`POST /api/tasks`, `PATCH /api/tasks/[id]`, `DELETE /api/tasks/[id]`) would call the search-sync service after successful database operations. This is fire-and-forget — if the sync fails, the database change still succeeded.
+
+### Async Nature of Meilisearch Indexing
+
+Both bulk and incremental operations return immediately — Meilisearch queues the work:
+
+```json
+// Response from POST /sync/all
+{"reindexed": 3}
+
+// But index stats might show 0 documents for a few seconds:
+{"numberOfDocuments": 0, "isIndexing": true}
+```
+
+After 1-3 seconds, the task completes:
+
+```json
+{"numberOfDocuments": 3, "isIndexing": false}
+```
+
+This is why health checks should verify `isIndexing: false` before running tests.
+
+---
+
+## Main App Search Endpoint Design
+
+### The Search Route
+
+The main app queries Meilisearch directly — no need to go through the search-sync service for reads:
+
+```typescript
+// src/app/api/tasks/search/route.ts
+import { Meilisearch } from "meilisearch";
+
+export async function GET(req: Request) {
+  const session = await auth();
+  if (!session?.user?.id) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  if (!process.env.MEILI_URL) {
+    return NextResponse.json(
+      { error: "Search service not configured" },
+      { status: 503 }
+    );
+  }
+
+  const meili = new Meilisearch({
+    host: process.env.MEILI_URL,
+    apiKey: process.env.MEILI_MASTER_KEY,
+  });
+
+  const { searchParams } = new URL(req.url);
+  const q = searchParams.get("q") || "";
+  const status = searchParams.get("status");
+  const priority = searchParams.get("priority");
+
+  const filters = [`userId = "${session.user.id}"`];
+  if (status) filters.push(`status = "${status}"`);
+  if (priority) filters.push(`priority = "${priority}"`);
+
+  const results = await meili.index("tasks").search(q, {
+    filter: filters,
+    limit: 50,
+  });
+
+  return NextResponse.json(results);
+}
+```
+
+### Key Design Decisions
+
+**1. Auth-scoped search**: The `userId` filter is always applied from the session, never from user input. Users can only search their own tasks.
+
+**2. Graceful degradation**: If `MEILI_URL` is not set (search service not deployed), the endpoint returns 503 instead of crashing. The rest of the app works normally.
+
+**3. Optional filters**: `status` and `priority` are optional query params. Users can search with or without filters:
+```
+GET /api/tasks/search?q=meeting                    → all tasks containing "meeting"
+GET /api/tasks/search?q=meeting&status=TODO        → TODO tasks containing "meeting"
+GET /api/tasks/search?q=&status=TODO&priority=HIGH → all HIGH priority TODO tasks
+```
+
+**4. Limit 50**: Prevents returning excessively large result sets. For pagination, Meilisearch supports `offset` and `limit` parameters.
+
+### Conditional Environment Variables
+
+The main app deployment template only injects `MEILI_URL` and `MEILI_MASTER_KEY` when Meilisearch is enabled:
+
+```yaml
+{{- if .Values.meilisearch.enabled }}
+- name: MEILI_URL
+  value: "http://{{ include "task-manager.fullname" . }}-meilisearch:7700"
+- name: MEILI_MASTER_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "task-manager.fullname" . }}-meilisearch-secret
+      key: masterKey
+{{- end }}
+```
+
+This means the search endpoint returns 503 (not configured) on deployments without Meilisearch — the app degrades gracefully.
+
+---
+
 ## Phase 2 Key Patterns and Best Practices
 
 ### 1. StatefulSet for Persistent Data
@@ -2304,6 +2791,22 @@ Use a single `base` stage with one `npm ci` call to avoid parallel builds exhaus
 ### 7. Force-Remove Before Image Load
 
 When updating images via `minikube image load`, always `docker rmi -f` the old image first. Otherwise Minikube keeps the stale image and pods run old code.
+
+### 8. Explicit Primary Key for Search Indexes
+
+When your data has multiple fields ending with "id" (e.g., `id`, `userId`, `taskId`), always set the primary key explicitly when creating the Meilisearch index. Don't rely on inference.
+
+### 9. Auth-Scoped Search Filters
+
+Every search query must include a `userId` filter derived from the session, not from user input. This is a security boundary — without it, users could see other users' data.
+
+### 10. Separate Read and Write Paths for Search
+
+The main app queries the search engine directly (reads), while a separate sync service handles indexing (writes). This decouples search logic from CRUD endpoints and allows independent scaling.
+
+### 11. Async Task Awareness
+
+Meilisearch operations are asynchronous — they return immediately but process via a task queue. Always account for indexing delay when verifying results. Use `waitForTask()` when immediate consistency is needed.
 
 ---
 
@@ -2356,6 +2859,83 @@ kubectl rollout restart deployment/task-manager-file-service -n task-manager
 
 **Solution**: This is harmless (404 logged in file-service logs). The ServiceMonitor correctly targets only the main app via label selectors.
 
+### Issue 17: Meilisearch documents not indexing (0 documents despite reindex)
+
+**Cause**: Meilisearch's primary key inference failed because multiple fields end with "id" (`id` and `userId`). The document addition task silently fails.
+
+**Diagnosis**:
+```bash
+# Check task queue for failed tasks
+kubectl exec deployment/task-manager -n task-manager -- node -e "
+  fetch('http://task-manager-meilisearch:7700/tasks?limit=5', {
+    headers: { Authorization: 'Bearer meili-master-key-change-me' }
+  }).then(r=>r.json()).then(t=>console.log(JSON.stringify(t.results.map(r=>({uid:r.uid,status:r.status,type:r.type})),null,2)))
+"
+# Look for status: "failed"
+```
+
+**Solution**: Delete the broken index and recreate with explicit `primaryKey: "id"`:
+```bash
+# Delete index
+kubectl exec deployment/task-manager -n task-manager -- node -e "
+  fetch('http://task-manager-meilisearch:7700/indexes/tasks', {
+    method: 'DELETE',
+    headers: { Authorization: 'Bearer meili-master-key-change-me' }
+  }).then(r=>r.json()).then(t=>console.log(t))
+"
+
+# Restart search-sync (recreates index with correct primary key)
+kubectl rollout restart deployment/task-manager-search-sync -n task-manager
+
+# Wait for pod, then trigger reindex
+kubectl exec deployment/task-manager -n task-manager -- node -e "
+  fetch('http://task-manager-search-sync:3006/sync/all', {method:'POST'}).then(r=>r.json()).then(t=>console.log(t))
+"
+```
+
+See [Primary Key Inference Bug](#primary-key-inference-bug).
+
+### Issue 18: `MeiliSearch is not defined` (wrong class name)
+
+**Cause**: The npm package renamed the export from `MeiliSearch` (capital S) to `Meilisearch` (lowercase s) in recent versions. Code using the old name fails.
+
+**Solution**: Use `Meilisearch` (lowercase s):
+```typescript
+import { Meilisearch } from "meilisearch";  // ✅ Correct
+// import { MeiliSearch } from "meilisearch"; // ❌ Old name, undefined
+```
+
+Verify the export name:
+```bash
+node -e "const m = require('meilisearch'); console.log(typeof m.Meilisearch)"
+```
+
+### Issue 19: Meilisearch refuses to start (`MEILI_ENV=production` without master key)
+
+**Cause**: Production mode requires a master key of at least 16 bytes. If the secret is empty or too short, Meilisearch exits on startup.
+
+**Diagnosis**:
+```bash
+kubectl logs -n task-manager meilisearch-0 | grep -i "master"
+# Error: You must provide a master key...
+```
+
+**Solution**: Ensure the master key is at least 16 bytes in the Helm values or Secret:
+```bash
+--set meilisearch.masterKey="meili-master-key-change-me"
+```
+
+### Issue 20: `npx tsx scripts/test.ts` OOMs in search-sync pod (exit code 137)
+
+**Cause**: The search-sync pod has limited resources (256Mi memory). Running `npx tsx` (which downloads/resolves TypeScript) exceeds the memory limit.
+
+**Solution**: Use Node.js `fetch()` directly from the main app pod instead of test scripts in resource-limited pods. Or use base64-encoded eval:
+```bash
+$script = "fetch('http://task-manager-meilisearch:7700/indexes/tasks/stats',{headers:{Authorization:'Bearer meili-master-key-change-me'}}).then(r=>r.json()).then(t=>console.log(JSON.stringify(t)))"
+$encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script))
+kubectl exec deployment/task-manager -n task-manager -- node -e "eval(Buffer.from('$encoded','base64').toString())"
+```
+
 ---
 
 ## What You've Learned in Stage 2 - Phase 2
@@ -2367,6 +2947,9 @@ kubectl rollout restart deployment/task-manager-file-service -n task-manager
 - MinIO S3-compatible object storage
 - AWS SDK v3 S3 Client (`@aws-sdk/client-s3`)
 - `@fastify/multipart` for file uploads
+- Meilisearch full-text search engine
+- Meilisearch JavaScript client (`meilisearch` npm package)
+- Search index configuration (searchable/filterable attributes)
 - initContainer pattern for service dependencies
 - Exponential backoff retry logic
 - ESM testing patterns (tsx + base64, test scripts)
@@ -2380,6 +2963,12 @@ kubectl rollout restart deployment/task-manager-file-service -n task-manager
 - Headless service DNS (per-pod names: `minio-0.minio-headless`)
 - S3 API compatibility (MinIO as local S3 replacement)
 - Object storage vs relational storage (files in MinIO, metadata in PostgreSQL)
+- Full-text search vs relational queries (Meilisearch vs PostgreSQL)
+- Searchable vs filterable attributes (what users search vs filter by)
+- Primary key inference and its limitations
+- Async task model (Meilisearch queues operations)
+- Bulk reindex vs incremental sync strategies
+- Read/write separation for search (main app reads, sync service writes)
 - Startup ordering via initContainers
 - Code-level retry as runtime safety net
 - Docker daemon memory limits and OOM kills
@@ -2394,6 +2983,10 @@ kubectl rollout restart deployment/task-manager-file-service -n task-manager
 - Force-remove old images before loading new ones into Minikube
 - Use `transformToByteArray()` for AWS SDK v3 response bodies
 - Test scripts in each service for reliable kubectl debugging
+- Always set primary key explicitly when multiple fields end with "id"
+- Scope search queries by userId (security boundary)
+- Separate search reads (main app) from search writes (sync service)
+- Graceful degradation when search service is not deployed
 
 ### Troubleshooting Skills:
 - Diagnosing Docker build OOM errors
@@ -2401,3 +2994,7 @@ kubectl rollout restart deployment/task-manager-file-service -n task-manager
 - Fixing AWS SDK v3 stream handling issues
 - Resolving stale Minikube images
 - Testing ESM services without curl/wget
+- Debugging Meilisearch failed task queue
+- Fixing primary key inference failures
+- Handling Meilisearch async indexing delays
+- Querying Meilisearch REST API via base64-encoded Node.js

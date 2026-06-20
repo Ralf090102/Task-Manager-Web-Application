@@ -351,16 +351,21 @@ if [[ "$SKIP_BUILDS" == true ]]; then
         write_ok "Image exists: $img"
     done
 else
-    write_step "Step 5: Build All Docker Images (Parallel)"
+    write_step "Step 5: Build All Docker Images (Parallel via Docker Desktop)"
 
-    # Build Docker images directly inside Minikube's internal Docker daemon.
-    # Images built with the host Docker daemon are NOT visible to Minikube pods.
+    # Images are built with Docker Desktop (host Docker daemon), which has
+    # more memory than Minikube's internal daemon. After building, each image
+    # is loaded into Minikube via `minikube image load`.
     #
-    # Three images are built IN PARALLEL for speed (~2-3x faster than sequential):
-    #   1. Main app (Next.js)       — context: task-manager/, Dockerfile: ./Dockerfile
-    #   2. Scheduler (Node.js/tsx)  — context: task-manager/, Dockerfile: services/scheduler/Dockerfile
-    #   3. Notification (Fastify)   — context: task-manager/, Dockerfile: services/notification/Dockerfile
+    # Why Docker Desktop over Minikube build:
+    #   - Docker Desktop has ~16GB+ available; Minikube's daemon shares ~7GB
+    #   - Large dependency trees (@aws-sdk, next.js) can OOM Minikube's daemon
+    #   - Docker Desktop builds are consistently faster
     #
+    # Tradeoff: after building, we must explicitly load each image into Minikube
+    # and force-remove stale images (Minikube caches by tag, not digest).
+    #
+    # All images are built IN PARALLEL for speed (~2-3x faster than sequential).
     # Microservice Dockerfiles use the task-manager/ directory as build context
     # so they can COPY the shared prisma/schema.prisma during Docker build.
 
@@ -377,16 +382,16 @@ else
     # Create a temp dir for parallel build logs (so output stays clean)
     BUILD_LOGS_DIR=$(mktemp -d)
 
-    write_info "Launching ${#BUILDS[@]} parallel Docker builds..."
+    write_info "Launching ${#BUILDS[@]} parallel Docker Desktop builds..."
 
-    # Launch all builds as background jobs
+    # Launch all builds as background jobs using Docker Desktop
     PIDS=()
     for build in "${BUILDS[@]}"; do
         IFS='|' read -r build_name build_tag build_dockerfile <<< "$build"
         write_info "  Starting: $build_name ($build_tag)"
 
         (
-            minikube image build -t "$build_tag" \
+            docker build -t "$build_tag" \
                 -f "$build_dockerfile" "$BUILD_CONTEXT" \
                 > "$BUILD_LOGS_DIR/${build_name}.log" 2>&1
         ) &
@@ -404,7 +409,7 @@ else
             tail -10 "$BUILD_LOGS_DIR/${build_name}.log" | sed 's/^/    /'
             BUILD_FAILED=true
         else
-            write_ok "Image built: $build_tag"
+            write_ok "Built: $build_tag"
         fi
     done
 
@@ -417,6 +422,25 @@ else
     fi
 
     write_ok "All ${#BUILDS[@]} images built successfully (parallel)"
+
+    # Load built images into Minikube's Docker daemon.
+    # force-remove stale images first — minikube image load doesn't overwrite
+    # existing tags, so pods would keep running old code without this step.
+    write_info "Loading ${#BUILDS[@]} images into Minikube..."
+
+    for build in "${BUILDS[@]}"; do
+        IFS='|' read -r build_name build_tag build_dockerfile <<< "$build"
+
+        # Force-remove old image (ignore errors if it doesn't exist yet)
+        minikube ssh "docker rmi -f $build_tag" >/dev/null 2>&1 || true
+
+        # Load the freshly built image
+        if ! minikube image load "$build_tag" >/dev/null 2>&1; then
+            write_err "Failed to load $build_tag into Minikube"
+            exit 1
+        fi
+        write_ok "Loaded: $build_tag"
+    done
 
     # Pull third-party images (MinIO, Meilisearch) that aren't built locally
     write_info "Pulling MinIO image into Minikube..."

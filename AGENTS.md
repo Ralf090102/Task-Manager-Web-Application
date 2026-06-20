@@ -114,8 +114,9 @@ Uses Tailwind v4 with new `@import "tailwindcss"` syntax in `globals.css`. Do NO
   # Enable NGINX Ingress controller
   minikube addons enable ingress
 
-  # Build image inside Minikube's Docker daemon
-  minikube image build -t ralf090102/task-manager-app:latest -f Dockerfile D:\GitHub\Task-Manager-Web-Application\task-manager
+  # Build image with Docker Desktop, then load into Minikube
+  docker build -t ralf090102/task-manager-app:latest -f Dockerfile ./task-manager
+  minikube image load ralf090102/task-manager-app:latest
 
   # Install/upgrade Helm release
   helm install task-manager ./task-manager/helm-chart --namespace task-manager --create-namespace --set secrets.databaseUrl=<URL> --set secrets.nextauthSecret=<SECRET> --set secrets.nextauthUrl=http://task-manager.local --set image.pullPolicy=Never
@@ -178,7 +179,7 @@ Uses Tailwind v4 with new `@import "tailwindcss"` syntax in `globals.css`. Do NO
 
 ### Overview
 
-Expanding the monolith into a microservices architecture. 8 planned modules across 4 phases. Module 7 (Scheduler), Module 1 (Notification), and Module 2 (File Service + MinIO) are implemented.
+Expanding the monolith into a microservices architecture. 8 planned modules across 4 phases. Module 7 (Scheduler), Module 1 (Notification), Module 2 (File Service + MinIO), and Module 5 (Search Sync + Meilisearch) are implemented.
 
 ### Module 7: Recurring Task Scheduler (Phase 1)
 
@@ -196,8 +197,9 @@ Expanding the monolith into a microservices architecture. 8 planned modules acro
 - **Image**: `ralf090102/scheduler-service:latest`
 - **Deploy commands**:
   ```bash
-  # Build scheduler image (from task-manager/)
-  minikube image build -t ralf090102/scheduler-service:latest -f services/scheduler/Dockerfile .
+  # Build scheduler image (from task-manager/, Docker Desktop)
+  docker build -t ralf090102/scheduler-service:latest -f services/scheduler/Dockerfile .
+  minikube image load ralf090102/scheduler-service:latest
 
   # Helm upgrade (reuse existing secrets)
   helm upgrade task-manager ./task-manager/helm-chart --namespace task-manager \
@@ -223,8 +225,9 @@ Expanding the monolith into a microservices architecture. 8 planned modules acro
 - **Build context**: `task-manager/` (same as scheduler)
 - **Deploy commands**:
   ```bash
-  # Build notification image (from task-manager/)
-  minikube image build -t ralf090102/notification-service:latest -f services/notification/Dockerfile .
+  # Build notification image (from task-manager/, Docker Desktop)
+  docker build -t ralf090102/notification-service:latest -f services/notification/Dockerfile .
+  minikube image load ralf090102/notification-service:latest
 
   # Helm upgrade with notification enabled
   # NOTE: --reuse-values does NOT read new values.yaml keys!
@@ -271,11 +274,9 @@ Expanding the monolith into a microservices architecture. 8 planned modules acro
 - **Build context**: `task-manager/` (same as other services)
 - **Deploy commands**:
   ```bash
-  # Build file-service image (from task-manager/)
-  # Use Docker Desktop + minikube image load if Minikube build OOMs:
+  # Build file-service image (from task-manager/, Docker Desktop)
   docker build -t ralf090102/file-service:latest -f services/file-service/Dockerfile .
   minikube image load ralf090102/file-service:latest
-  # (or: minikube image build -t ralf090102/file-service:latest -f services/file-service/Dockerfile .)
 
   # Helm upgrade with MinIO + file-service enabled
   # NOTE: --reuse-values does NOT read new values.yaml keys!
@@ -315,6 +316,73 @@ Expanding the monolith into a microservices architecture. 8 planned modules acro
   kubectl exec deployment/task-manager-file-service -n task-manager -- npx tsx scripts/test.ts attachments
   ```
 
+### Module 5: Search Sync + Meilisearch (Phase 2)
+
+- **Service**: `services/search-sync/` — Node.js Fastify HTTP microservice that syncs PostgreSQL tasks to Meilisearch
+- **Purpose**: Full-text search indexing — bulk reindex and incremental document sync
+- **Runtime**: `tsx` (same pattern as other services)
+- **Port**: 3006 (ClusterIP only — no Ingress, internal access only)
+- **Endpoints**: `GET /health`, `POST /sync/task` (incremental), `DELETE /sync/task/:id`, `POST /sync/all` (bulk reindex)
+- **Search engine**: Meilisearch (`getmeili/meilisearch:v1.6`) running as StatefulSet with persistent volume (5Gi)
+- **Meilisearch**: StatefulSet (`meilisearch-0`) with `volumeClaimTemplates` (5Gi), Headless Service + ClusterIP Service, health probe at `/health`, `MEILI_ENV=production` requires `MEILI_MASTER_KEY`
+- **Primary key**: Must be explicitly set via `createIndex("tasks", { primaryKey: "id" })` — Meilisearch can't infer it when multiple fields end with "id" (e.g., `id` and `userId`)
+- **Index config**: Configured on startup — searchable: `["title", "description"]`, filterable: `["status", "priority", "userId"]`
+- **initContainer**: Waits for Meilisearch `/health` endpoint before search-sync starts (same pattern as file-service/MinIO)
+- **Main app endpoint**: `GET /api/tasks/search?q=...&status=...&priority=...` — queries Meilisearch directly, scoped by `userId` filter
+- **Main app env vars**: `MEILI_URL` and `MEILI_MASTER_KEY` added conditionally to deployment when `meilisearch.enabled=true`
+- **Helm templates**: `templates/search/` (StatefulSet, headless-service, service, secret), `templates/search-sync/` (Deployment with initContainer, Service)
+- **values.yaml**: `meilisearch:` section (enabled, image, persistence, masterKey, resources), `searchSync:` section (enabled, image, resources)
+- **Image**: `ralf090102/search-sync-service:latest`, `getmeili/meilisearch:v1.6`
+- **Build context**: `task-manager/` (same as other services)
+- **Deploy commands**:
+  ```bash
+  # Build search-sync image (from task-manager/, Docker Desktop)
+  docker build -t ralf090102/search-sync-service:latest -f services/search-sync/Dockerfile .
+  minikube image load ralf090102/search-sync-service:latest
+
+  # Pull Meilisearch image into Minikube
+  minikube image pull getmeili/meilisearch:v1.6
+
+  # Helm upgrade with Meilisearch + search-sync enabled
+  # NOTE: --reuse-values does NOT read new values.yaml keys!
+  # Must pass ALL meilisearch.* and searchSync.* values via --set on first deploy:
+  helm upgrade task-manager ./task-manager/helm-chart --namespace task-manager \
+    --reuse-values \
+    --set meilisearch.enabled=true \
+    --set meilisearch.image.repository=getmeili/meilisearch \
+    --set meilisearch.image.tag=v1.6 \
+    --set meilisearch.image.pullPolicy=Never \
+    --set meilisearch.persistence.size=5Gi \
+    --set meilisearch.masterKey="meili-master-key-change-me" \
+    --set meilisearch.resources.limits.cpu=250m \
+    --set meilisearch.resources.limits.memory=512Mi \
+    --set meilisearch.resources.requests.cpu=100m \
+    --set meilisearch.resources.requests.memory=256Mi \
+    --set searchSync.enabled=true \
+    --set searchSync.image.repository=ralf090102/search-sync-service \
+    --set searchSync.image.tag=latest \
+    --set searchSync.image.pullPolicy=Never \
+    --set searchSync.resources.limits.cpu=250m \
+    --set searchSync.resources.limits.memory=256Mi \
+    --set searchSync.resources.requests.cpu=100m \
+    --set searchSync.resources.requests.memory=128Mi
+
+  # Subsequent upgrades only need --reuse-values:
+  helm upgrade task-manager ./task-manager/helm-chart --namespace task-manager --reuse-values
+
+  # Test health endpoints:
+  kubectl exec deployment/task-manager -n task-manager -- node -e "fetch('http://task-manager-meilisearch:7700/health').then(r=>r.json()).then(j=>console.log(j))"
+  kubectl exec deployment/task-manager -n task-manager -- node -e "fetch('http://task-manager-search-sync:3006/health').then(r=>r.json()).then(j=>console.log(j))"
+
+  # Trigger bulk reindex (initial sync):
+  kubectl exec deployment/task-manager -n task-manager -- node -e "fetch('http://task-manager-search-sync:3006/sync/all',{method:'POST'}).then(r=>r.json()).then(j=>console.log(j))"
+
+  # Query Meilisearch directly (via REST API with base64 encoding for PowerShell):
+  $script = "fetch('http://task-manager-meilisearch:7700/indexes/tasks/stats',{headers:{Authorization:'Bearer meili-master-key-change-me'}}).then(r=>r.json()).then(t=>console.log(JSON.stringify(t)))"
+  $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script))
+  kubectl exec deployment/task-manager -n task-manager -- node -e "eval(Buffer.from('$encoded','base64').toString())"
+  ```
+
 ### Service Selector Labels (Critical)
 
 The main app Deployment and Service MUST have `app.kubernetes.io/component: app` in their labels/selectors. Without it, the main app Service selector (`app.kubernetes.io/name=task-manager` + `app.kubernetes.io/instance=task-manager`) matches ALL pods with those base labels — including notification pods. This causes traffic to be load-balanced across both pods (Fastify returns 404 for Next.js routes like `/dashboard`).
@@ -324,6 +392,8 @@ The main app Deployment and Service MUST have `app.kubernetes.io/component: app`
 - Notification: `app.kubernetes.io/component: notification`
 - File service: `app.kubernetes.io/component: file-service`
 - MinIO: `app.kubernetes.io/component: minio`
+- Meilisearch: `app.kubernetes.io/component: meilisearch`
+- Search sync: `app.kubernetes.io/component: search-sync`
 - Scheduler: N/A (CronJob, no Service)
 
 ### Microservice Pattern (reusable for future services)
@@ -350,7 +420,9 @@ helm-chart/templates/
 ├── scheduler/                # Scheduler (cronjob)
 ├── notification/             # Notification (deployment, service, secret)
 ├── minio/                    # MinIO (statefulset, headless-service, service, secret)
-└── file-service/             # File service (deployment with initContainer, service)
+├── file-service/             # File service (deployment with initContainer, service)
+├── search/                   # Meilisearch (statefulset, headless-service, service, secret)
+└── search-sync/              # Search sync (deployment with initContainer, service)
 ```
 
 Each service has an `enabled` flag in `values.yaml` for conditional rendering.
@@ -397,20 +469,23 @@ spec:
 
 **Complementary**: Also implement retry logic in the service code (exponential backoff) as a safety net for runtime failures, not just startup.
 
-### Docker Build Workflow (Minikube OOM Workaround)
+### Docker Build Workflow (Docker Desktop → Minikube Load)
 
-Minikube's Docker daemon has limited memory (~7GB). Large `npm ci` builds (e.g., `@aws-sdk/client-s3` has many sub-packages) can trigger `npm error Exit handler never called!` (OOM kill). The workaround: build with Docker Desktop (more memory), then load into Minikube.
+All images are built with Docker Desktop (host Docker daemon), then loaded into Minikube. This is the default — not a fallback. Docker Desktop has more memory (~16GB+ vs Minikube's ~7GB shared daemon), builds are faster, and OOM kills on large dependency trees (e.g., `@aws-sdk/client-s3`) are eliminated.
+
+`setup-cluster.sh` automates this: parallel `docker build` for all services → force-remove stale images in Minikube → `minikube image load` for each.
+
+For ad-hoc manual rebuilds of a single service:
 
 ```bash
 # 1. Build with Docker Desktop (from task-manager/)
 docker build -t ralf090102/<service>:latest -f services/<service>/Dockerfile .
 
-# 2. Load into Minikube
-minikube image load ralf090102/<service>:latest
-
-# 3. IMPORTANT: Force-remove old image before loading updates
-#    Otherwise Minikube keeps the stale image:
+# 2. IMPORTANT: Force-remove old image from Minikube before loading
+#    Minikube caches by tag, not digest — without this, pods keep stale code:
 minikube ssh "docker rmi -f ralf090102/<service>:latest"
+
+# 3. Load the freshly built image into Minikube
 minikube image load ralf090102/<service>:latest
 
 # 4. Restart the deployment to pick up new image
