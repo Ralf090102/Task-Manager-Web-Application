@@ -94,6 +94,7 @@ NOTIFICATION_IMAGE="ralf090102/notification-service"
 FILE_SERVICE_IMAGE="ralf090102/file-service"
 SEARCH_SYNC_IMAGE="ralf090102/search-sync-service"
 REALTIME_IMAGE="ralf090102/realtime-service"
+ANALYTICS_IMAGE="ralf090102/analytics-service"
 MINIO_IMAGE="minio/minio"
 MEILISEARCH_IMAGE="getmeili/meilisearch"
 MEILISEARCH_TAG="v1.6"
@@ -344,6 +345,7 @@ if [[ "$SKIP_BUILDS" == true ]]; then
                "${FILE_SERVICE_IMAGE}:${MICROSERVICE_TAG}" \
                "${SEARCH_SYNC_IMAGE}:${MICROSERVICE_TAG}" \
                "${REALTIME_IMAGE}:${MICROSERVICE_TAG}" \
+               "${ANALYTICS_IMAGE}:${MICROSERVICE_TAG}" \
                "${MINIO_IMAGE}:${MICROSERVICE_TAG}" \
                "${MEILISEARCH_IMAGE}:${MEILISEARCH_TAG}"; do
         if ! minikube image ls --format "{{.Repository}}:{{.Tag}}" 2>/dev/null | grep -q "$img"; then
@@ -380,6 +382,7 @@ else
         "file-service|${FILE_SERVICE_IMAGE}:${MICROSERVICE_TAG}|${BUILD_CONTEXT}/services/file-service/Dockerfile"
         "search-sync|${SEARCH_SYNC_IMAGE}:${MICROSERVICE_TAG}|${BUILD_CONTEXT}/services/search-sync/Dockerfile"
         "realtime|${REALTIME_IMAGE}:${MICROSERVICE_TAG}|${BUILD_CONTEXT}/services/realtime/Dockerfile"
+        "analytics|${ANALYTICS_IMAGE}:${MICROSERVICE_TAG}|${BUILD_CONTEXT}/services/analytics/Dockerfile"
     )
 
     # Create a temp dir for parallel build logs (so output stays clean)
@@ -596,7 +599,15 @@ helm upgrade --install "$APP_RELEASE" \
     --set realtime.resources.limits.cpu=250m \
     --set realtime.resources.limits.memory=256Mi \
     --set realtime.resources.requests.cpu=100m \
-    --set realtime.resources.requests.memory=128Mi >/dev/null 2>&1
+    --set realtime.resources.requests.memory=128Mi \
+    --set analytics.enabled=true \
+    --set analytics.image.repository="${ANALYTICS_IMAGE}" \
+    --set analytics.image.tag="${MICROSERVICE_TAG}" \
+    --set analytics.image.pullPolicy=Never \
+    --set analytics.resources.limits.cpu=250m \
+    --set analytics.resources.limits.memory=256Mi \
+    --set analytics.resources.requests.cpu=100m \
+    --set analytics.resources.requests.memory=128Mi >/dev/null 2>&1
 
 if [[ $? -ne 0 ]]; then
     write_err "Helm deploy failed"
@@ -763,6 +774,31 @@ if echo "$RT_HEALTH" | grep -q "ok"; then
     write_ok "Realtime service is healthy"
 else
     write_err "Realtime service health check failed"
+fi
+
+# Wait for analytics pod to be ready.
+write_info "Waiting for analytics pod to be ready..."
+kubectl wait --namespace "$APP_NAMESPACE" \
+    --for=condition=ready pod \
+    --selector="app.kubernetes.io/component=analytics" \
+    --timeout=120s >/dev/null 2>&1
+
+if [[ $? -ne 0 ]]; then
+    write_err "analytics pod did not become ready"
+    write_info "Check: kubectl logs -n $APP_NAMESPACE -l app.kubernetes.io/component=analytics -c analytics"
+    exit 1
+fi
+write_ok "analytics pod is running"
+
+# Verify the analytics health endpoint.
+write_info "Testing analytics service health endpoint..."
+ANALYTICS_HEALTH=$(kubectl exec -n "$APP_NAMESPACE" deployment/"$APP_RELEASE" \
+    -- node -e "fetch('http://${APP_RELEASE}-analytics:8000/health').then(r=>r.text()).then(t=>console.log(t))" 2>/dev/null || echo "")
+
+if echo "$ANALYTICS_HEALTH" | grep -q "ok"; then
+    write_ok "Analytics service is healthy"
+else
+    write_err "Analytics service health check failed"
 fi
 
 # ============================================================================

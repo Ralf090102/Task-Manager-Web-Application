@@ -3,6 +3,7 @@ import { auth } from "@/lib/auth";
 import prisma from "@/lib/prisma";
 import Navbar from "@/components/Navbar";
 import TaskList from "@/components/TaskList";
+import StatsWidget from "@/components/StatsWidget";
 
 export default async function DashboardPage() {
   const session = await auth();
@@ -23,6 +24,9 @@ export default async function DashboardPage() {
     <>
       <Navbar />
       <main className="mx-auto max-w-5xl px-4 py-8">
+        <div className="mb-6">
+          <StatsWidget />
+        </div>
         <TaskList initialTasks={serialized} />
       </main>
     </>
