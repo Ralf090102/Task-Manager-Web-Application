@@ -31,6 +31,7 @@ model User {
   tasks          Task[]
   recurringTasks RecurringTask[]
   notifications  Notification[]
+  webhooks       Webhook[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -141,4 +142,40 @@ model Notification {
   createdAt DateTime @default(now())
 
   @@index([userId])
+}
+
+model Webhook {
+  id         String            @id @default(cuid())
+  userId     String
+  user       User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  url        String
+  events     String[]
+  secret     String
+  active     Boolean           @default(true)
+  deliveries WebhookDelivery[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+}
+
+model WebhookDelivery {
+  id          String   @id @default(cuid())
+  webhookId   String
+  webhook     Webhook  @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+  event       String
+  payload     Json
+  statusCode  Int?
+  response    String?
+  attempts    Int      @default(0)
+  maxAttempts Int      @default(5)
+  nextRetryAt DateTime?
+  deliveredAt DateTime?
+  status      String   @default("pending")
+  createdAt   DateTime @default(now())
+
+  @@index([webhookId])
+  @@index([status])
+  @@index([nextRetryAt])
 }
