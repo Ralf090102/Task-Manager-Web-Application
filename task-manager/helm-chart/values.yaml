@@ -148,6 +148,21 @@ realtime:
       cpu: 100m
       memory: 128Mi
 
+analytics:
+  enabled: false
+  image:
+    repository: ralf090102/analytics-service
+    pullPolicy: IfNotPresent
+    tag: latest
+  cronSchedule: "0 9 * * 1"
+  resources:
+    limits:
+      cpu: 250m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
 monitoring:
   enabled: true
   serviceMonitor:

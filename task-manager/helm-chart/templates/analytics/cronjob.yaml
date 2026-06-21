@@ -1,0 +1,34 @@
+{{- if .Values.analytics.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "task-manager.fullname" . }}-weekly-report
+  labels:
+    {{- include "task-manager.labels" . | nindent 4 }}
+    app.kubernetes.io/component: analytics
+spec:
+  schedule: "{{ .Values.analytics.cronSchedule | default "0 9 * * 1" }}"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: report-generator
+              image: "{{ .Values.analytics.image.repository }}:{{ .Values.analytics.image.tag }}"
+              imagePullPolicy: {{ .Values.analytics.image.pullPolicy }}
+              command: ["python", "-m", "scripts.weekly_report"]
+              env:
+                - name: DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "task-manager.fullname" . }}-secrets
+                      key: database-url
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+              resources:
+                {{- toYaml .Values.analytics.resources | nindent 16 }}
+{{- end }}

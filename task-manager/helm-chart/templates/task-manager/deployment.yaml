@@ -57,6 +57,10 @@ spec:
             - name: REALTIME_URL
               value: "http://{{ include "task-manager.fullname" . }}-realtime:3001"
             {{- end }}
+            {{- if .Values.analytics.enabled }}
+            - name: ANALYTICS_URL
+              value: "http://{{ include "task-manager.fullname" . }}-analytics:8000"
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /
