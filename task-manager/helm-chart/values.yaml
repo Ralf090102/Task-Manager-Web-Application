@@ -163,6 +163,23 @@ analytics:
       cpu: 100m
       memory: 128Mi
 
+webhook:
+  enabled: false
+  image:
+    repository: ralf090102/webhook-service
+    pullPolicy: IfNotPresent
+    tag: latest
+  retry:
+    maxAttempts: 5
+    intervals: [1, 5, 30, 120, 600]
+  resources:
+    limits:
+      cpu: 250m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
 monitoring:
   enabled: true
   serviceMonitor:

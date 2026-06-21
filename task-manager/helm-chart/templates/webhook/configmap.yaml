@@ -1,0 +1,14 @@
+{{- if .Values.webhook.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "task-manager.fullname" . }}-webhook-config
+  labels:
+    {{- include "task-manager.labels" . | nindent 4 }}
+    app.kubernetes.io/component: webhook
+data:
+  MAX_ATTEMPTS: "{{ .Values.webhook.retry.maxAttempts | default 5 }}"
+  BACKOFF_INTERVALS: "{{ join "," (.Values.webhook.retry.intervals | default (list 1 5 30 120 600)) }}"
+  POLL_INTERVAL_MS: "2000"
+  DELIVERY_TIMEOUT_MS: "10000"
+{{- end }}
