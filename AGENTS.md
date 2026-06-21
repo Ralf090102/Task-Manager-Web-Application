@@ -383,6 +383,62 @@ Expanding the monolith into a microservices architecture. 8 planned modules acro
   kubectl exec deployment/task-manager -n task-manager -- node -e "eval(Buffer.from('$encoded','base64').toString())"
   ```
 
+### Module 3: Analytics & Reporting Service (Phase 3)
+
+- **Service**: `services/analytics/` — Python FastAPI analytics microservice (polyglot)
+- **Purpose**: Productivity analytics — task completion rates, daily history, priority breakdown, weekly reports
+- **Runtime**: Python 3.12 with uvicorn (NOT tsx/Node.js — this is the first polyglot service)
+- **Port**: 8000 (ClusterIP only — no Ingress, internal access only)
+- **Database access**: Raw SQL via `asyncpg` (NOT Prisma — Python service uses its own DB driver)
+- **pgbouncer compatibility**: `statement_cache_size=0` required — Supabase connection pooler doesn't support prepared statements
+- **DATABASE_URL cleaning**: Strips `?pgbouncer=true&connection_limit=1` query params before passing to asyncpg
+- **Endpoints**: `GET /health`, `GET /stats/summary/{user_id}` (status counts, completion rate, 30-day daily history), `GET /stats/productivity/{user_id}` (by-priority breakdown)
+- **CronJob**: `scripts/weekly_report.py` — generates matplotlib charts, creates in-app Notification records, runs every Monday 9 AM UTC
+- **Main app integration**:
+  - `src/app/api/stats/route.ts` — proxies requests to analytics service (auth-scoped, passes user ID)
+  - `src/components/StatsWidget.tsx` — dashboard widget showing total/completed/rate/priority stats
+- **Helm templates**: `templates/analytics/` — Deployment, Service (ClusterIP), CronJob (weekly report)
+- **values.yaml**: `analytics:` section with `enabled`, `image`, `cronSchedule`, `resources`
+- **Image**: `ralf090102/analytics-service:latest`
+- **Build context**: `task-manager/` (same as other services)
+- **PYTHONUNBUFFERED=1**: Required for real-time log output in K8s
+- **Deploy commands**:
+  ```bash
+  # Build analytics image (from task-manager/, Docker Desktop)
+  docker build -t ralf090102/analytics-service:latest -f services/analytics/Dockerfile .
+  minikube image load ralf090102/analytics-service:latest
+
+  # Helm upgrade with analytics enabled
+  # NOTE: --reuse-values does NOT read new values.yaml keys!
+  # Must pass ALL analytics.* values via --set on first deploy:
+  helm upgrade task-manager ./task-manager/helm-chart --namespace task-manager \
+    --reuse-values \
+    --set analytics.enabled=true \
+    --set analytics.image.repository=ralf090102/analytics-service \
+    --set analytics.image.tag=latest \
+    --set analytics.image.pullPolicy=Never \
+    --set analytics.resources.limits.cpu=250m \
+    --set analytics.resources.limits.memory=256Mi \
+    --set analytics.resources.requests.cpu=100m \
+    --set analytics.resources.requests.memory=128Mi
+
+  # Subsequent upgrades only need --reuse-values:
+  helm upgrade task-manager ./task-manager/helm-chart --namespace task-manager --reuse-values
+
+  # Test health endpoint:
+  kubectl exec deployment/task-manager -n task-manager -- node -e "fetch('http://task-manager-analytics:8000/health').then(r=>r.json()).then(j=>console.log(j))"
+  # Expected: {"status":"ok"}
+
+  # Test stats endpoint (replace user-id with a real cuid):
+  kubectl exec deployment/task-manager -n task-manager -- node -e "fetch('http://task-manager-analytics:8000/stats/summary/<user-id>').then(r=>r.json()).then(j=>console.log(j))"
+  # Expected: JSON with statusCounts, completionRate, totalTasks, dailyHistory
+
+  # Trigger weekly report manually:
+  kubectl create job --from=cronjob/task-manager-weekly-report manual-report -n task-manager
+  kubectl logs job/manual-report -n task-manager
+  # Expected: "[weekly-report] Done — N reports generated"
+  ```
+
 ### Module 4: Real-time WebSocket Gateway (Phase 3)
 
 - **Service**: `services/realtime/` — Node.js Socket.io WebSocket gateway
@@ -450,6 +506,7 @@ The main app Deployment and Service MUST have `app.kubernetes.io/component: app`
 - Meilisearch: `app.kubernetes.io/component: meilisearch`
 - Search sync: `app.kubernetes.io/component: search-sync`
 - Realtime: `app.kubernetes.io/component: realtime`
+- Analytics: `app.kubernetes.io/component: analytics`
 - Scheduler: N/A (CronJob, no Service)
 
 ### Microservice Pattern (reusable for future services)
@@ -481,7 +538,8 @@ helm-chart/templates/
 ├── file-service/             # File service (deployment with initContainer, service)
 ├── search/                   # Meilisearch (statefulset, headless-service, service, secret)
 ├── search-sync/              # Search sync (deployment with initContainer, service)
-└── realtime/                 # Realtime WebSocket (deployment, service with sessionAffinity)
+├── realtime/                 # Realtime WebSocket (deployment, service with sessionAffinity)
+└── analytics/                # Analytics (deployment, service, cronjob)
 ```
 
 Each service has an `enabled` flag in `values.yaml` for conditional rendering.

@@ -1,6 +1,6 @@
-# Stage 2 - Phase 1 & 2 Learning Summary
+# Stage 2 - Phase 1, 2 & 3 Learning Summary
 
-This document explains the core concepts and technologies implemented in Phases 1-2 of the Task Manager microservices expansion. It covers Module 7 (Recurring Task Scheduler), Module 1 (Notification Service), Module 2 (File Service + MinIO), and Module 5 (Search Sync + Meilisearch). Each section includes real examples from your codebase.
+This document explains the core concepts and technologies implemented in Phases 1-3 of the Task Manager microservices expansion. It covers Module 7 (Recurring Task Scheduler), Module 1 (Notification Service), Module 2 (File Service + MinIO), Module 5 (Search Sync + Meilisearch), Module 4 (Real-time WebSocket Gateway), and Module 3 (Analytics & Reporting Service). Each section includes real examples from your codebase.
 
 ---
 
@@ -56,6 +56,29 @@ This document explains the core concepts and technologies implemented in Phases 
 43. [Phase 2 Key Patterns and Best Practices](#phase-2-key-patterns-and-best-practices)
 44. [Phase 2 Troubleshooting](#phase-2-troubleshooting)
 
+### Phase 3: Real-time WebSocket + Analytics
+
+45. [WebSocket Protocol and Socket.io](#websocket-protocol-and-socketio)
+46. [Socket.io Server Architecture](#socketio-server-architecture)
+47. [JWT Authentication for WebSocket Connections](#jwt-authentication-for-websocket-connections)
+48. [The `jose` Library and NextAuth JWT Decryption](#the-jose-library-and-nextauth-jwt-decryption)
+49. [NGINX Ingress WebSocket Routing](#nginx-ingress-websocket-routing)
+50. [Kubernetes Service Session Affinity](#kubernetes-service-session-affinity)
+51. [Fire-and-Forget Event Emission Pattern](#fire-and-forget-event-emission-pattern)
+52. [Frontend Socket.io Client Integration](#frontend-socketio-client-integration)
+53. [Polyglot Microservices: Python + Node.js](#polyglot-microservices-python--nodejs)
+54. [FastAPI Framework and ASGI](#fastapi-framework-and-asgi)
+55. [asyncpg with PgBouncer Compatibility](#asyncpg-with-pgbouncer-compatibility)
+56. [DATABASE_URL Cleaning for Connection Poolers](#database_url-cleaning-for-connection-poolers)
+57. [Python Docker Multi-Stage Build](#python-docker-multi-stage-build)
+58. [matplotlib Chart Generation in Headless Mode](#matplotlib-chart-generation-in-headless-mode)
+59. [Kubernetes CronJob for Batch Reporting](#kubernetes-cronjob-for-batch-reporting)
+60. [Analytics API Proxy Pattern](#analytics-api-proxy-pattern)
+61. [Dashboard Widget Integration](#dashboard-widget-integration)
+62. [Graceful Degradation for Optional Services](#graceful-degradation-for-optional-services)
+63. [Phase 3 Key Patterns and Best Practices](#phase-3-key-patterns-and-best-practices)
+64. [Phase 3 Troubleshooting](#phase-3-troubleshooting)
+
 ---
 
 ## Microservices Architecture in a Monorepo
@@ -72,8 +95,8 @@ task-manager/
 ├── services/                      # Microservices directory
 │   ├── notification/              # Module 1 (implemented)
 │   ├── file-service/              # Module 2 (implemented)
-│   ├── analytics/                 # Module 3 (future)
-│   ├── realtime/                  # Module 4 (future)
+│   ├── analytics/                 # Module 3 (implemented)
+│   ├── realtime/                  # Module 4 (implemented)
 │   ├── search-sync/               # Module 5 (implemented)
 │   ├── webhook/                   # Module 6 (future)
 │   ├── scheduler/                 # Module 7 (implemented)
@@ -1633,13 +1656,19 @@ kubectl exec deployment/task-manager -n task-manager -- \
 
 ## Next Steps: Phase 3
 
-In Phase 3, you'll learn:
-- WebSocket service with sticky sessions (Module 4)
-- Python microservice (Module 3)
-- Background worker pattern with retry logic (Module 6)
-- Cross-service event emission
+Phase 3 continues below with **real-time WebSocket communication** (Module 4) and **polyglot Python analytics** (Module 3). You'll learn:
 
-This will expand the architecture with real-time communication and polyglot services.
+- WebSocket protocol and Socket.io rooms/broadcasting (Module 4)
+- JWT-based authentication for WebSocket connections
+- NGINX Ingress WebSocket routing with sticky sessions
+- Fire-and-forget event emission from the main app to the realtime gateway
+- Frontend Socket.io client with live task board updates
+- Python/FastAPI as the first polyglot service (Module 3)
+- asyncpg with PgBouncer compatibility
+- matplotlib chart generation in headless (server) mode
+- CronJob for weekly report generation
+
+See the Phase 3 sections below starting at [WebSocket Protocol and Socket.io](#websocket-protocol-and-socketio).
 
 ---
 
@@ -2998,3 +3027,1788 @@ kubectl exec deployment/task-manager -n task-manager -- node -e "eval(Buffer.fro
 - Fixing primary key inference failures
 - Handling Meilisearch async indexing delays
 - Querying Meilisearch REST API via base64-encoded Node.js
+
+---
+
+# Stage 2 - Phase 3 Learning Summary
+
+Phase 3 introduces **real-time communication** and **polyglot services**. Module 4 is a WebSocket gateway built with Socket.io that pushes live task updates to the browser. Module 3 is a Python analytics service (the first non-Node.js microservice) that computes productivity statistics and generates weekly chart reports.
+
+This phase teaches you WebSocket protocols, Socket.io rooms/broadcasting, NGINX Ingress WebSocket routing, sticky sessions, JWT decryption, Python/FastAPI, asyncpg with PgBouncer, matplotlib in headless mode, and the analytics API proxy pattern.
+
+---
+
+## Table of Contents (Phase 3)
+
+45. [WebSocket Protocol and Socket.io](#websocket-protocol-and-socketio)
+46. [Socket.io Server Architecture](#socketio-server-architecture)
+47. [JWT Authentication for WebSocket Connections](#jwt-authentication-for-websocket-connections)
+48. [The `jose` Library and NextAuth JWT Decryption](#the-jose-library-and-nextauth-jwt-decryption)
+49. [NGINX Ingress WebSocket Routing](#nginx-ingress-websocket-routing)
+50. [Kubernetes Service Session Affinity](#kubernetes-service-session-affinity)
+51. [Fire-and-Forget Event Emission Pattern](#fire-and-forget-event-emission-pattern)
+52. [Frontend Socket.io Client Integration](#frontend-socketio-client-integration)
+53. [Polyglot Microservices: Python + Node.js](#polyglot-microservices-python--nodejs)
+54. [FastAPI Framework and ASGI](#fastapi-framework-and-asgi)
+55. [asyncpg with PgBouncer Compatibility](#asyncpg-with-pgbouncer-compatibility)
+56. [DATABASE_URL Cleaning for Connection Poolers](#database_url-cleaning-for-connection-poolers)
+57. [Python Docker Multi-Stage Build](#python-docker-multi-stage-build)
+58. [matplotlib Chart Generation in Headless Mode](#matplotlib-chart-generation-in-headless-mode)
+59. [Kubernetes CronJob for Batch Reporting](#kubernetes-cronjob-for-batch-reporting)
+60. [Analytics API Proxy Pattern](#analytics-api-proxy-pattern)
+61. [Dashboard Widget Integration](#dashboard-widget-integration)
+62. [Graceful Degradation for Optional Services](#graceful-degradation-for-optional-services)
+63. [Phase 3 Key Patterns and Best Practices](#phase-3-key-patterns-and-best-practices)
+64. [Phase 3 Troubleshooting](#phase-3-troubleshooting)
+
+---
+
+## WebSocket Protocol and Socket.io
+
+### HTTP vs WebSocket
+
+All previous services communicated via **HTTP** — request/response. The client asks, the server answers, the connection closes. This works for most things, but it's **one-directional**: the server can't push data to the browser unless the browser asks first.
+
+**WebSocket** is a different protocol that provides a **persistent, bidirectional** connection:
+
+| Aspect | HTTP | WebSocket |
+|--------|------|-----------|
+| Connection | Short-lived (request → response → close) | Long-lived (stays open) |
+| Direction | Client → Server only | Bidirectional (both ways) |
+| Protocol | `http://` / `https://` | `ws://` / `wss://` |
+| Overhead | Headers on every request | Handshake once, then lightweight frames |
+| Use case | API calls, page loads | Live updates, chat, notifications |
+
+### How WebSocket Works
+
+1. The browser sends an HTTP request with an `Upgrade: websocket` header
+2. The server responds with `101 Switching Protocols`
+3. The connection is now a WebSocket — both sides can send frames at any time
+4. The connection stays open until either side closes it
+
+```
+Browser                         Server
+  |--- HTTP GET /socket.io/ ------>|   (Upgrade: websocket)
+  |<--- 101 Switching Protocols ---|
+  |                                |
+  |<===== WebSocket frame (task) ==|   (server pushes)
+  |=== WebSocket frame (ping) ====>|   (client pushes)
+  |                                |
+  |<--- WebSocket frame -----------|   (server pushes again)
+```
+
+### Why Socket.io Instead of Raw `ws`?
+
+**Socket.io** is a library built on top of WebSocket. It adds:
+
+- **Auto-reconnect**: If the connection drops, Socket.io automatically reconnects
+- **Fallback transport**: If WebSocket isn't available (e.g., corporate proxy), it falls back to HTTP long-polling
+- **Rooms**: Group connected clients (e.g., all users viewing the same board)
+- **Broadcasting**: Send a message to all clients in a room with one call
+- **Event-based API**: Named events instead of raw data frames
+- **Acknowledgements**: Confirm receipt of messages
+
+| Raw WebSocket (`ws`) | Socket.io |
+|----------------------|-----------|
+| Manual reconnection logic | Auto-reconnect built in |
+| No rooms — you track clients yourself | `socket.join("board")` built in |
+| Raw binary/text frames | Named events: `socket.emit("task:created", data)` |
+| No fallback | Falls back to long-polling |
+| Lower overhead | Slightly more overhead (negligible) |
+
+For this project, Socket.io's rooms and auto-reconnect make it the right choice.
+
+### Socket.io Server Setup
+
+```typescript
+// services/realtime/src/index.ts
+import { createServer } from "http";
+import { Server } from "socket.io";
+
+const httpServer = createServer(/* ... HTTP handlers ... */);
+
+const io = new Server(httpServer, {
+  cors: {
+    origin: CORS_ORIGIN,
+    methods: ["GET", "POST"],
+  },
+  path: "/socket.io/",  // Must match the NGINX Ingress path
+});
+
+httpServer.listen(PORT, "0.0.0.0", () => {
+  console.log(`[realtime] Socket.io server listening on port ${PORT}`);
+});
+```
+
+**Key point**: Socket.io creates its own HTTP server internally. We create a raw `httpServer` first, attach our own HTTP route handlers (`/health`, `/emit`), then hand it to Socket.io. Socket.io listens on the same port — HTTP requests go to our handlers, WebSocket upgrades go to Socket.io.
+
+---
+
+## Socket.io Server Architecture
+
+### Rooms and Broadcasting
+
+A **room** is a named group of connected sockets. Any socket can join a room, and you can broadcast events to everyone in a room:
+
+```typescript
+io.on("connection", (socket) => {
+  // Every authenticated user joins the shared board room
+  socket.join("board");
+
+  // Also joins their personal room (for targeted messages)
+  socket.join(`user:${userId}`);
+
+  // Broadcast to everyone in the board room EXCEPT sender
+  socket.on("task:created", (data) => {
+    socket.to("board").emit("task:created", data);
+  });
+});
+```
+
+| Method | Recipients |
+|--------|-----------|
+| `socket.emit(event, data)` | Only this socket |
+| `socket.to("board").emit(...)` | Everyone in "board" EXCEPT this socket |
+| `io.to("board").emit(...)` | Everyone in "board" INCLUDING this socket |
+| `io.emit(...)` | ALL connected sockets |
+
+### The Internal `/emit` Endpoint
+
+The realtime service also has a regular HTTP endpoint — `POST /emit`. This is how the **main Next.js app** pushes events to connected browsers:
+
+```typescript
+// POST /emit — internal endpoint (not for browsers)
+if (req.url === "/emit" && req.method === "POST") {
+  const { event, room, data } = JSON.parse(body);
+  if (room) {
+    io.to(room).emit(event, data);
+  } else {
+    io.emit(event, data);
+  }
+  sendJson(res, 200, { emitted: true, event, room: room || "broadcast" });
+}
+```
+
+**Flow**:
+```
+User creates task → Next.js API route → POST /emit to realtime →
+realtime broadcasts to all browsers in "board" room → browsers refresh
+```
+
+### The `/health` Endpoint
+
+```typescript
+if (req.url === "/health" && req.method === "GET") {
+  sendJson(res, 200, {
+    status: "ok",
+    connections: io.engine.clientsCount,  // Active WebSocket count
+  });
+}
+```
+
+This is used by Kubernetes liveness/readiness probes. The `clientsCount` is useful for debugging — you can see how many browsers are connected at any time.
+
+### Connection Lifecycle
+
+```typescript
+io.on("connection", (socket) => {
+  const userId = socket.data.userId;
+  console.log(`[realtime] User connected: ${userId} (${socket.id})`);
+
+  socket.join(`user:${userId}`);
+  socket.join("board");
+
+  // Handle events from this client...
+
+  socket.on("disconnect", (reason) => {
+    console.log(`[realtime] User disconnected: ${userId} (${reason})`);
+    socket.to("board").emit("presence:offline", { userId });
+  });
+});
+```
+
+Each client gets:
+1. **Joined to `board`** — receives all task events
+2. **Joined to `user:<id>`** — receives personal notifications
+3. **Presence tracking** — other clients know when this user is online/offline
+
+### No Database Access
+
+The realtime service is a **pure relay** — it doesn't read from or write to PostgreSQL. No Prisma, no database connection. This makes it:
+- Fast (no DB round-trips)
+- Stateless (can scale horizontally — connections are the only state)
+- Simple (less code, fewer failure modes)
+
+```dockerfile
+# services/realtime/Dockerfile — notice: NO prisma generate
+FROM node:22-slim AS base
+COPY services/realtime/package.json services/realtime/package-lock.json* ./
+RUN npm ci --no-audit --no-fund
+
+FROM base AS runner
+RUN npm prune --omit=dev
+ENV NODE_ENV=production
+EXPOSE 3001
+COPY --from=builder /app/src/ ./src/
+CMD ["npx", "tsx", "src/index.ts"]
+```
+
+Compare this to other services (notification, file-service) that include `COPY prisma/schema.prisma` and `RUN npx prisma generate`. The realtime Dockerfile is simpler because it has no database dependency.
+
+---
+
+## JWT Authentication for WebSocket Connections
+
+### The Problem: Authenticating WebSocket Connections
+
+HTTP APIs authenticate via headers (`Authorization: Bearer ...`). But WebSocket connections start as an HTTP handshake and then upgrade — you can't easily add headers to the upgrade request from a browser.
+
+Socket.io solves this with the **handshake auth** pattern: the client sends credentials in the `auth` field during the initial connection:
+
+```typescript
+// Frontend (browser)
+const socket = io({
+  path: "/socket.io/",
+  auth: { token: jwtToken }   // Sent during handshake
+});
+```
+
+### Server-Side Authentication Middleware
+
+Socket.io provides middleware to intercept connections before they're accepted:
+
+```typescript
+// services/realtime/src/index.ts
+io.use(async (socket, next) => {
+  try {
+    const token = socket.handshake.auth.token;
+    if (!token) {
+      return next(new Error("No token provided"));
+    }
+
+    // Decrypt the JWT to verify identity
+    const { payload } = await jwtDecrypt(token, secret);
+    const userId = payload.id;
+
+    if (!userId) {
+      return next(new Error("Invalid token: no user id"));
+    }
+
+    // Store userId on the socket for later use
+    socket.data.userId = userId;
+    next();  // Accept the connection
+  } catch {
+    next(new Error("Invalid token"));  // Reject the connection
+  }
+});
+```
+
+**How it works**:
+1. Browser calls `io({ auth: { token } })` — Socket.io includes the token in the handshake
+2. Server middleware runs `jwtDecrypt(token, secret)` — if valid, extracts `userId`
+3. `next()` accepts the connection; `next(new Error(...))` rejects it
+4. The `userId` is stored on `socket.data` for use in all event handlers
+
+### Why Not Just Send the Session Cookie?
+
+The browser's session cookie (`authjs.session-token`) is sent automatically with HTTP requests. But:
+
+1. **WebSocket cross-origin**: If the Socket.io server is on a different origin (different port), cookies may not be sent
+2. **Explicit is better**: Passing the token explicitly in `auth` is clearer and works across origins
+3. **Socket.io design**: The `auth` field is the recommended way to pass credentials
+
+In this project, the token **is** the session cookie value — fetched via the `/api/ws-token` endpoint and passed as the `auth.token` field.
+
+---
+
+## The `jose` Library and NextAuth JWT Decryption
+
+### NextAuth v5 JWT Strategy
+
+NextAuth v5 uses **JWT session strategy** by default. The session cookie contains an **encrypted JWT** — not just signed, but encrypted. This means:
+
+- **Signed JWT** (`jws`): Anyone can read the payload, only the server can sign it
+- **Encrypted JWT** (`jwe`): Nobody can read the payload without the secret key
+
+NextAuth uses encryption because the JWT contains the user ID and other sensitive data. The encryption key is derived from `NEXTAUTH_SECRET`.
+
+### The `jose` Library
+
+`jose` is a JavaScript library for JWT operations (sign, verify, encrypt, decrypt). NextAuth v5 uses it internally. We use `jose` directly in the realtime service to decrypt the same JWT:
+
+```typescript
+import { jwtDecrypt } from "jose";
+
+const NEXTAUTH_SECRET = process.env.NEXTAUTH_SECRET;
+const secret = new TextEncoder().encode(NEXTAUTH_SECRET);
+
+const { payload } = await jwtDecrypt(token, secret);
+const userId = payload.id;  // Custom ID we injected via NextAuth callbacks
+```
+
+### Why `TextEncoder`?
+
+`jwtDecrypt` expects the key as a `Uint8Array` (raw bytes), not a string. `TextEncoder().encode()` converts a string to UTF-8 bytes:
+
+```typescript
+const secret = new TextEncoder().encode(NEXTAUTH_SECRET);
+// "my-secret" → Uint8Array [109, 121, 45, 115, 101, 99, ...]
+```
+
+### Why This Works
+
+Both NextAuth and the realtime service share the same `NEXTAUTH_SECRET` environment variable. In Kubernetes, this is injected from the same Secret:
+
+```yaml
+# helm-chart/templates/realtime/deployment.yaml
+env:
+  - name: NEXTAUTH_SECRET
+    valueFrom:
+      secretKeyRef:
+        name: {{ include "task-manager.fullname" . }}-secrets
+        key: nextauth-secret
+```
+
+The main app uses this secret to **encrypt** the JWT. The realtime service uses the same secret to **decrypt** it. Neither service ever passes the user ID in plaintext — the encrypted JWT is the trust boundary.
+
+### The Custom `id` Field
+
+NextAuth's default JWT payload contains `sub` (subject) but not `id`. In this project, we inject a custom `id` field via NextAuth callbacks:
+
+```typescript
+// src/lib/auth.ts (callbacks.jwt)
+async jwt({ token, user }) {
+  if (user) token.id = user.id;  // Inject user ID into JWT
+  return token;
+}
+```
+
+This is why the realtime service reads `payload.id` instead of `payload.sub`.
+
+---
+
+## NGINX Ingress WebSocket Routing
+
+### The Challenge
+
+The realtime service runs on port 3001 inside the cluster. The browser connects to `ws://task-manager.local/socket.io/`. NGINX Ingress must:
+
+1. Route `/socket.io/` requests to the realtime service (not the main app)
+2. Support the WebSocket protocol upgrade (`Upgrade: websocket`)
+3. Keep the connection open for a long time (not timeout after 60 seconds)
+
+### Path-Baseded Routing
+
+The Ingress uses **multiple path rules** — `/socket.io` goes to realtime, everything else goes to the main app:
+
+```yaml
+# helm-chart/templates/task-manager/ingress.yaml
+spec:
+  rules:
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          # WebSocket route — must come first (longest-prefix match)
+          {{- if $.Values.realtime.enabled }}
+          - path: /socket.io
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "task-manager.fullname" $ }}-realtime
+                port:
+                  number: 3001
+          {{- end }}
+          # Default route — everything else goes to the main app
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "task-manager.fullname" $ }}
+                port:
+                  number: {{ $.Values.service.port }}
+          {{- end }}
+```
+
+**How NGINX routes**: NGINX uses **longest-prefix match**. A request to `/socket.io/?EIO=4&transport=polling` matches `/socket.io` (Prefix) before it matches `/` (Prefix). So WebSocket traffic goes to realtime, everything else goes to the main app.
+
+### WebSocket Timeout Annotations
+
+By default, NGINX Ingress closes idle connections after 60 seconds. WebSocket connections are long-lived (minutes to hours), so we increase the timeout:
+
+```yaml
+{{- if .Values.realtime.enabled }}
+annotations:
+  nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+  nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+{{- end }}
+```
+
+| Annotation | Default | Our Value | Effect |
+|-----------|---------|-----------|--------|
+| `proxy-read-timeout` | 60s | 3600s (1 hour) | How long NGINX waits for data from the backend |
+| `proxy-send-timeout` | 60s | 3600s (1 hour) | How long NGINX waits when sending data to the backend |
+
+Without these, you'd see WebSocket connections silently dropped after 60 seconds of inactivity.
+
+### NGINX WebSocket Support
+
+NGINX Ingress Controller automatically detects WebSocket upgrade requests and adds the necessary headers (`Connection: Upgrade`, `Upgrade: websocket`). You don't need to configure this manually — it's built into the NGINX Ingress Controller.
+
+### Conditional Rendering
+
+The WebSocket path and annotations are only added when `realtime.enabled` is true in Helm values. This means you can deploy without the realtime service and the Ingress works normally for the main app.
+
+---
+
+## Kubernetes Service Session Affinity
+
+### The Problem with Multiple Replicas
+
+If the realtime service has multiple replicas, the Service load-balances connections. But WebSocket connections are **stateful** — a specific socket is connected to a specific pod. If a subsequent HTTP request (like Socket.io's polling fallback) goes to a different pod, it fails.
+
+```
+Browser → Service → Pod A (WebSocket connection established)
+Browser → Service → Pod B (polling request — Pod B doesn't know about this client!)
+```
+
+### Solution: Session Affinity (Sticky Sessions)
+
+Kubernetes Services support **sessionAffinity: ClientIP** — all requests from the same client IP go to the same pod:
+
+```yaml
+# helm-chart/templates/realtime/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "task-manager.fullname" . }}-realtime
+spec:
+  type: ClusterIP
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800  # 3 hours
+  ports:
+    - port: 3001
+      targetPort: ws
+      name: ws
+  selector:
+    {{- include "task-manager.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: realtime
+```
+
+| Setting | Value | Meaning |
+|---------|-------|---------|
+| `sessionAffinity` | `ClientIP` | Route same client to same pod |
+| `timeoutSeconds` | `10800` (3 hours) | How long to remember the affinity |
+
+### How ClientIP Affinity Works
+
+1. Browser connects from IP `10.0.0.5`
+2. Service routes to Pod A
+3. Kubernetes remembers: `10.0.0.5 → Pod A`
+4. Next request from `10.0.0.5` → goes to Pod A (not randomized)
+5. After 3 hours of inactivity, the mapping expires
+
+### Why 10800 Seconds (3 Hours)?
+
+The default `timeoutSeconds` is 10800 (3 hours). This is appropriate because WebSocket connections can be long-lived. If you set it too short, a user who leaves their browser open but idle might get routed to a different pod when they interact again.
+
+### When You Don't Need Sticky Sessions
+
+Services without state — like the main Next.js app or the analytics service — don't need session affinity. Any pod can handle any request because they're all stateless. Only the realtime service needs sticky sessions because WebSocket connections are stateful.
+
+---
+
+## Fire-and-Forget Event Emission Pattern
+
+### The Problem: Main App → Realtime Communication
+
+When a user creates, updates, or deletes a task, the main Next.js app needs to tell the realtime service to broadcast the event to all connected browsers. But:
+
+1. The task operation should **not fail** if the realtime service is down
+2. The user should **not wait** for the broadcast to complete
+3. The main app should **not crash** if the realtime service is unreachable
+
+### The Solution: Fire-and-Forget
+
+```typescript
+// src/lib/realtime.ts
+const REALTIME_URL = process.env.REALTIME_URL;
+
+export async function emitToRealtime(
+  event: string,
+  data: unknown,
+  room?: string
+): Promise<void> {
+  if (!REALTIME_URL) return;  // Realtime not configured — skip silently
+
+  try {
+    await fetch(`${REALTIME_URL}/emit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ event, data, room: room ?? "board" }),
+    });
+  } catch {
+    // Silent fail — realtime is a best-effort enhancement
+  }
+}
+```
+
+**Key design decisions**:
+
+| Decision | Rationale |
+|----------|-----------|
+| `if (!REALTIME_URL) return` | Graceful degradation when realtime is not deployed |
+| `try/catch` with empty `catch` | Never throw — realtime failure shouldn't break task operations |
+| `room ?? "board"` | Default to the shared board room |
+| No retry logic | If it fails, the user will just refresh manually — not critical |
+
+### Usage in API Routes
+
+```typescript
+// src/app/api/tasks/route.ts (after creating a task)
+import { emitToRealtime } from "@/lib/realtime";
+
+export async function POST(request: NextRequest) {
+  // ... create task in database ...
+  const task = await prisma.task.create({ data });
+
+  // Fire-and-forget: tell realtime to broadcast
+  await emitToRealtime("task:created", task);
+
+  return NextResponse.json(task);
+}
+```
+
+The `await` is technically there (JavaScript requires it for async functions), but the operation is so fast (a single HTTP POST to an internal service) that it's effectively non-blocking. And even if it fails, the `catch` swallows the error silently.
+
+### Why Not Use a Message Queue?
+
+In a larger system, you'd use a message queue (RabbitMQ, Redis Pub/Sub, Kafka) for reliable event delivery. But for this project:
+
+- **Simplicity**: Direct HTTP POST is simpler than setting up a message broker
+- **Acceptable failure**: If a real-time update is missed, the user just refreshes — no data loss
+- **Small scale**: One realtime pod, one main app — no need for pub/sub scaling
+
+---
+
+## Frontend Socket.io Client Integration
+
+### The Connection Flow
+
+```
+1. Browser loads dashboard page
+2. React component fetches /api/ws-token → gets JWT token
+3. Socket.io client connects with the token
+4. Server validates token, accepts connection
+5. Client listens for events → refreshes task list on changes
+```
+
+### The `/api/ws-token` Endpoint
+
+The frontend needs the NextAuth JWT to authenticate with the realtime service. This endpoint returns it:
+
+```typescript
+// src/app/api/ws-token/route.ts
+export async function GET() {
+  const session = await auth();
+  if (!session?.user?.id) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const cookieStore = await cookies();
+  const token =
+    cookieStore.get("authjs.session-token")?.value ||
+    cookieStore.get("__Secure-authjs.session-token")?.value;
+
+  if (!token) {
+    return NextResponse.json({ error: "No session token" }, { status: 401 });
+  }
+
+  return NextResponse.json({ token });
+}
+```
+
+**Why this endpoint exists**: The session cookie is `HttpOnly` — JavaScript can't read it directly. This endpoint reads it server-side and returns it as JSON. The frontend then passes it to Socket.io as the `auth.token`.
+
+**Security**: The endpoint checks authentication first (`auth()`) — only logged-in users get a token. The token is the same encrypted JWT that's in the cookie, so it's equally secure.
+
+### The TaskList Client Component
+
+```typescript
+// src/components/TaskList.tsx
+import { io } from "socket.io-client";
+
+export default function TaskList({ initialTasks }: TaskListProps) {
+  const [tasks, setTasks] = useState<Task[]>(initialTasks);
+  const [live, setLive] = useState(false);
+  const refreshRef = useRef(refreshTasks);
+
+  useEffect(() => {
+    let socket: ReturnType<typeof io> | null = null;
+
+    async function connect() {
+      try {
+        // 1. Get the JWT token
+        const res = await fetch("/api/ws-token");
+        if (!res.ok) return;
+        const { token } = await res.json();
+
+        // 2. Connect to Socket.io with the token
+        socket = io({ path: "/socket.io/", auth: { token } });
+
+        // 3. Listen for events
+        socket.on("connect", () => setLive(true));
+        socket.on("disconnect", () => setLive(false));
+        socket.on("task:created", () => refreshRef.current());
+        socket.on("task:updated", () => refreshRef.current());
+        socket.on("task:deleted", () => refreshRef.current());
+      } catch {
+        // Real-time is optional — fail silently
+      }
+    }
+
+    connect();
+
+    // 4. Cleanup on unmount
+    return () => { socket?.disconnect(); };
+  }, []);
+}
+```
+
+### Key Patterns
+
+**`refreshRef` instead of `refreshTasks` directly**: The `useEffect` has `[]` deps (runs once). If it referenced `refreshTasks` directly, it would capture a stale closure. Using a ref ensures the latest `refreshTasks` is always called:
+
+```typescript
+const refreshRef = useRef(refreshTasks);
+useEffect(() => { refreshRef.current = refreshTasks; }, [refreshTasks]);
+```
+
+**`io({ path: "/socket.io/" })`**: Socket.io client connects to the **same origin** as the page (no URL needed). The `path` must match the server-side `path: "/socket.io/"` and the NGINX Ingress `/socket.io` route.
+
+**The "Live" badge**: When `live` is true (socket connected), the UI shows a badge:
+
+```tsx
+{live && (
+  <span className="... bg-green-100 text-green-700 ...">
+    Live
+  </span>
+)}
+```
+
+**Cleanup**: The `return () => socket?.disconnect()` ensures the socket is closed when the component unmounts (e.g., navigating away from the dashboard). Without this, you'd get memory leaks and zombie connections.
+
+### `socket.io-client` Package
+
+The frontend uses the `socket.io-client` package (separate from the server-side `socket.io`):
+
+```json
+// package.json
+"dependencies": {
+  "socket.io-client": "^4.7.0"
+}
+```
+
+```typescript
+import { io } from "socket.io-client";  // Client import
+```
+
+The client handles:
+- Connection establishment (HTTP polling → WebSocket upgrade)
+- Auto-reconnection (exponential backoff)
+- Event buffering (queues events sent while disconnected)
+
+---
+
+## Polyglot Microservices: Python + Node.js
+
+### What Is a Polyglot Architecture?
+
+A **polyglot** microservices architecture uses multiple programming languages across services. Each service is written in the language best suited for its task:
+
+| Service | Language | Why |
+|---------|----------|-----|
+| Main app (Next.js) | TypeScript | Rich UI ecosystem, SSR |
+| Scheduler | TypeScript | Shared Prisma schema |
+| Notification | TypeScript | Shared Prisma schema |
+| File service | TypeScript | Shared Prisma schema |
+| Search sync | TypeScript | Shared Prisma schema |
+| Realtime | TypeScript | Socket.io ecosystem |
+| **Analytics** | **Python** | **Data analysis ecosystem (pandas, matplotlib, numpy)** |
+
+### Why Python for Analytics?
+
+Python is the dominant language for data analysis and scientific computing:
+
+- **matplotlib**: The standard charting library (bar charts, line graphs, heatmaps)
+- **pandas**: Data manipulation (not used here, but available)
+- **numpy**: Numerical computing (dependency of matplotlib)
+- **FastAPI**: Modern, fast async web framework
+- **asyncpg**: High-performance async PostgreSQL driver
+
+In Node.js, chart generation requires headless browser rendering (Puppeteer) or limited libraries. In Python, `matplotlib.savefig()` generates charts in 3 lines of code.
+
+### The Shared Database as Contract
+
+The analytics service doesn't share TypeScript types with the main app. Instead, they share a **database schema** — both services connect to the same PostgreSQL database:
+
+```
+Node.js (Prisma) → PostgreSQL ← Python (asyncpg)
+     ↓                              ↓
+   Task model                   Raw SQL queries
+   (type-safe)                  (no type safety)
+```
+
+**Pros**: Each service uses its native ORM/driver. No cross-language type definitions.
+**Cons**: No compile-time type checking in Python. If the schema changes, the Python service doesn't know until runtime.
+
+### Schema Awareness Without Prisma
+
+The Python service writes raw SQL with knowledge of the Prisma schema:
+
+```python
+# Prisma uses quoted table/column names by default
+await conn.fetch(
+    'SELECT status, COUNT(*) as count '
+    'FROM "Task" WHERE "userId" = $1 GROUP BY status',
+    user_id,
+)
+```
+
+Note the **double-quoted identifiers**: `"Task"`, `"userId"`. Prisma generates these quoted names in PostgreSQL. The Python service must match them exactly.
+
+### Monorepo Structure for Polyglot
+
+```
+task-manager/
+├── services/
+│   ├── scheduler/          # Node.js (package.json, tsconfig.json)
+│   ├── notification/       # Node.js
+│   ├── analytics/          # Python (requirements.txt, no tsconfig)
+│   │   ├── main.py
+│   │   ├── requirements.txt
+│   │   ├── scripts/
+│   │   │   └── weekly_report.py
+│   │   └── Dockerfile
+│   └── realtime/           # Node.js
+├── prisma/
+│   └── schema.prisma       # Shared (Node.js services generate Prisma client,
+│                           # Python service uses raw SQL against same tables)
+```
+
+Each Python service has:
+- `requirements.txt` (instead of `package.json`)
+- `Dockerfile` (uses `python:3.12-slim` base image)
+- No `tsconfig.json`, no Prisma config
+
+---
+
+## FastAPI Framework and ASGI
+
+### What Is FastAPI?
+
+**FastAPI** is a modern Python web framework (like Express for Python). It's built on top of **Starlette** (ASGI toolkit) and uses Python type hints for automatic validation and documentation.
+
+```python
+from fastapi import FastAPI
+
+app = FastAPI(title="Task Analytics")
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+@app.get("/stats/summary/{user_id}")
+async def get_summary(user_id: str):
+    # user_id is automatically parsed as a string from the URL path
+    ...
+    return {"statusCounts": {...}, "completionRate": 92.5}
+```
+
+### FastAPI vs Flask vs Express
+
+| Feature | FastAPI | Flask | Express (Node.js) |
+|---------|---------|-------|-------------------|
+| Language | Python | Python | JavaScript |
+| Async support | Native (`async def`) | Limited (needs extensions) | Native |
+| Type hints | Yes (auto-validation) | No | No |
+| Auto OpenAPI docs | Yes (`/docs`) | Needs extension | Needs extension |
+| Performance | High (ASGI) | Medium (WSGI) | High |
+| WebSocket support | Yes | Needs extension | Via `ws`/`socket.io` |
+
+### ASGI vs WSGI
+
+Python has two web server interfaces:
+
+| Aspect | WSGI (old) | ASGI (new) |
+|--------|-----------|------------|
+| Full name | Web Server Gateway Interface | Asynchronous Server Gateway Interface |
+| Async | No (synchronous) | Yes |
+| WebSocket | No | Yes |
+| Server | Gunicorn, uWSGI | Uvicorn, Daphne |
+| Frameworks | Flask, Django (traditional) | FastAPI, Starlette |
+
+The analytics service uses **Uvicorn** as the ASGI server:
+
+```dockerfile
+# Dockerfile CMD
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+
+- `main:app` — the `app` object in `main.py`
+- `--host 0.0.0.0` — listen on all interfaces (required for containers)
+- `--port 8000` — listen on port 8000
+
+### The Lifespan Context Manager
+
+FastAPI uses a **lifespan** context manager for startup/shutdown logic:
+
+```python
+from contextlib import asynccontextmanager
+
+db_pool: asyncpg.Pool | None = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global db_pool
+    # --- STARTUP ---
+    db_url = clean_db_url(os.environ["DATABASE_URL"])
+    db_pool = await asyncpg.create_pool(
+        db_url, min_size=1, max_size=5, statement_cache_size=0
+    )
+    print("[analytics] DB pool created")
+
+    yield  # App runs here
+
+    # --- SHUTDOWN ---
+    if db_pool:
+        await db_pool.close()
+        print("[analytics] DB pool closed")
+
+app = FastAPI(title="Task Analytics", lifespan=lifespan)
+```
+
+This is equivalent to:
+- **Startup**: Create a database connection pool (reused across requests)
+- **Shutdown**: Close the pool cleanly
+
+The pool is stored in a `global` variable — all route handlers access the same pool.
+
+### Automatic OpenAPI Documentation
+
+FastAPI automatically generates interactive API docs at `/docs` (Swagger UI) and `/redoc` (ReDoc). No extra code needed — it reads type hints and docstrings. This is a major advantage over Express/Flask.
+
+---
+
+## asyncpg with PgBouncer Compatibility
+
+### What Is asyncpg?
+
+**asyncpg** is a high-performance async PostgreSQL client for Python. It's significantly faster than `psycopg2` (the traditional Python PostgreSQL driver) because:
+
+- **Async from the ground up**: No blocking calls, integrates with `asyncio`
+- **Direct binary protocol**: Talks PostgreSQL's wire protocol directly (no libpq C library)
+- **Prepared statements**: Caches query plans for repeat executions
+
+```python
+import asyncpg
+
+# Create a connection pool (reused across requests)
+db_pool = await asyncpg.create_pool(db_url, min_size=1, max_size=5)
+
+# Use a connection from the pool
+async with db_pool.acquire() as conn:
+    rows = await conn.fetch(
+        'SELECT * FROM "Task" WHERE "userId" = $1', user_id
+    )
+```
+
+### The PgBouncer Problem
+
+**PgBouncer** is a PostgreSQL connection pooler (used by Supabase). It multiplexes many client connections over a few server connections. But it has a limitation: **it doesn't support prepared statements**.
+
+asyncpg uses prepared statements by default — it prepares each query once and reuses the plan. With PgBouncer, this fails because different clients might share the same server connection, and prepared statements are per-connection.
+
+**The error you'd see without the fix**:
+```
+asyncpg.exceptions.InvalidSQLStatementNameError: prepared statement "__asyncpg_..." does not exist
+```
+
+### The Fix: `statement_cache_size=0`
+
+Setting `statement_cache_size=0` disables asyncpg's prepared statement cache:
+
+```python
+db_pool = await asyncpg.create_pool(
+    db_url,
+    min_size=1,
+    max_size=5,
+    statement_cache_size=0,  # ← THE FIX: disable prepared statements
+)
+```
+
+| Setting | Default | Our Value | Effect |
+|---------|---------|-----------|--------|
+| `statement_cache_size` | 100 | 0 | Disables query plan caching |
+
+With this setting, asyncpg sends each query as a simple query (no `PREPARE`/`EXECUTE`), which is compatible with PgBouncer's transaction-level pooling.
+
+### Connection Pool Sizing
+
+```python
+asyncpg.create_pool(db_url, min_size=1, max_size=5)
+```
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| `min_size` | 1 | Keep one connection warm (no cold-start latency) |
+| `max_size` | 5 | Handle up to 5 concurrent requests (sufficient for internal service) |
+
+---
+
+## DATABASE_URL Cleaning for Connection Poolers
+
+### The Problem
+
+Supabase provides a `DATABASE_URL` that includes PgBouncer-specific query parameters:
+
+```
+postgresql://user:pass@db.xxx.supabase.co:6543/postgres?pgbouncer=true&connection_limit=1
+```
+
+These query parameters (`?pgbouncer=true&connection_limit=1`) are understood by PgBouncer and some drivers (like Prisma), but **not by asyncpg**. If you pass this URL directly to `asyncpg.create_pool()`, it may fail or behave unexpectedly.
+
+### The Fix: Strip Query Parameters
+
+```python
+def clean_db_url(url: str) -> str:
+    if "?" in url:
+        return url.split("?")[0]
+    return url
+
+# Before: postgresql://user:pass@host:6543/postgres?pgbouncer=true&connection_limit=1
+# After:  postgresql://user:pass@host:6543/postgres
+db_url = clean_db_url(os.environ["DATABASE_URL"])
+```
+
+This strips everything after `?`, leaving a clean connection string that asyncpg can parse.
+
+### Why Not Just Use a Different URL?
+
+In Kubernetes, the `DATABASE_URL` environment variable is injected from a shared Secret:
+
+```yaml
+env:
+  - name: DATABASE_URL
+    valueFrom:
+      secretKeyRef:
+        name: task-manager-secrets
+        key: database-url
+```
+
+All services share the same Secret. The Node.js services (Prisma) need the PgBouncer parameters; the Python service (asyncpg) doesn't. So the Python service strips them at runtime.
+
+### Same Pattern in the CronJob Script
+
+The weekly report script uses the same cleaning logic:
+
+```python
+# services/analytics/scripts/weekly_report.py
+def clean_db_url(url: str) -> str:
+    if "?" in url:
+        return url.split("?")[0]
+    return url
+
+conn = await asyncpg.connect(clean_db_url(DB_URL), statement_cache_size=0)
+```
+
+This is a simple function, duplicated in both files. In a larger Python codebase, you'd extract it to a shared module.
+
+---
+
+## Python Docker Multi-Stage Build
+
+### The Pattern
+
+Python Dockerfiles use a different multi-stage pattern than Node.js:
+
+```dockerfile
+# services/analytics/Dockerfile
+FROM python:3.12-slim AS builder
+WORKDIR /app
+COPY services/analytics/requirements.txt ./
+RUN pip install --user --no-cache-dir -r requirements.txt
+
+FROM python:3.12-slim
+WORKDIR /app
+COPY --from=builder /root/.local /root/.local
+COPY services/analytics/main.py ./
+COPY services/analytics/scripts/ ./scripts/
+ENV PATH=/root/.local/bin:$PATH
+ENV PYTHONUNBUFFERED=1
+EXPOSE 8000
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+
+### How It Works
+
+| Stage | Purpose | Key Command |
+|-------|---------|-------------|
+| `builder` | Install Python packages to `/root/.local` | `pip install --user` |
+| Final | Copy installed packages + source code | `COPY --from=builder /root/.local` |
+
+### `pip install --user` — The Key Trick
+
+The `--user` flag installs packages to `~/.local/` (user-level, not system-level):
+
+```bash
+# Without --user: packages go to /usr/local/lib/python3.12/site-packages/ (system-wide)
+# With --user:    packages go to /root/.local/lib/python3.12/site-packages/ (user-level)
+```
+
+This is important because:
+1. **Isolation**: User packages are in a known location (`/root/.local`)
+2. **Copyability**: We can `COPY --from=builder /root/.local` to the final image
+3. **Clean separation**: System Python stays clean; only user packages are copied
+
+### `PATH` Update
+
+The `--user` flag installs executables (like `uvicorn`) to `/root/.local/bin/`. We need to add this to `PATH`:
+
+```dockerfile
+ENV PATH=/root/.local/bin:$PATH
+```
+
+Without this, `CMD ["uvicorn", ...]` would fail because `uvicorn` wouldn't be found.
+
+### `PYTHONUNBUFFERED=1`
+
+```dockerfile
+ENV PYTHONUNBUFFERED=1
+```
+
+Python buffers stdout by default — print statements may not appear in `kubectl logs` immediately. `PYTHONUNBUFFERED=1` disables buffering, so logs appear in real-time.
+
+**This is critical in Kubernetes**: Without it, you might see no logs for minutes, then a flood of buffered output. With it, logs stream immediately — essential for debugging.
+
+### `requirements.txt`
+
+```
+fastapi
+uvicorn[standard]
+asyncpg
+matplotlib
+```
+
+- `fastapi` — web framework
+- `uvicorn[standard]` — ASGI server (the `[standard]` extra includes `httptools` and `uvloop` for performance)
+- `asyncpg` — PostgreSQL driver
+- `matplotlib` — chart generation (heavy dependency — needs numpy, etc.)
+
+### Comparison with Node.js Dockerfiles
+
+| Aspect | Node.js Services | Python Service |
+|--------|-----------------|----------------|
+| Base image | `node:22-slim` | `python:3.12-slim` |
+| Dependencies | `package.json` → `npm ci` | `requirements.txt` → `pip install` |
+| Runtime | `npx tsx src/index.ts` | `uvicorn main:app` |
+| Build context | `task-manager/` (for prisma schema) | `task-manager/` (for consistency) |
+| Multi-stage | base → builder → runner | builder → final |
+| Dev dependency pruning | `npm prune --omit=dev` | `--user` only installs production deps |
+
+---
+
+## matplotlib Chart Generation in Headless Mode
+
+### The Problem: No Display Server
+
+`matplotlib` was designed for interactive use — it opens a window to display charts. In a Docker container (or any headless server), there's no X Window System (display server). If you try to create a chart, matplotlib crashes:
+
+```
+_tkinter.TclError: no display name and no $DISPLAY environment variable
+```
+
+### The Fix: `matplotlib.use("Agg")`
+
+The **Agg backend** is a non-interactive backend that renders to a file (or in-memory buffer) without a display:
+
+```python
+import matplotlib
+matplotlib.use("Agg")  # MUST be before importing pyplot!
+import matplotlib.pyplot as plt
+```
+
+**Critical ordering**: `matplotlib.use("Agg")` must be called **before** `import matplotlib.pyplot`. If you import `pyplot` first, it may already select a different backend.
+
+### Generating a Chart
+
+```python
+fig, ax = plt.subplots(figsize=(10, 5))
+ax.bar(days, counts, color="#3b82f6")
+ax.set_title(f"Weekly Task Creation — {user['name']}")
+ax.set_ylabel("Tasks Created")
+ax.set_xlabel("Date")
+fig.tight_layout()
+
+# Save to in-memory buffer (no file on disk needed)
+buf = io.BytesIO()
+fig.savefig(buf, format="png", dpi=150)
+plt.close(fig)  # Free memory!
+```
+
+### `io.BytesIO` for In-Memory Images
+
+Instead of writing to a file on disk (which would need persistent storage), we write to a **BytesIO buffer** — an in-memory file-like object:
+
+```python
+import io
+
+buf = io.BytesIO()
+fig.savefig(buf, format="png", dpi=150)
+chart_bytes = buf.getvalue()  # Raw PNG bytes
+```
+
+In this project, the chart isn't actually stored or sent anywhere — it's generated to prove the capability. In a production system, you'd upload it to S3/MinIO or send it via email.
+
+### `plt.close(fig)` — Memory Management
+
+```python
+plt.close(fig)  # IMPORTANT: free the figure's memory
+```
+
+matplotlib holds figures in memory until explicitly closed. In a loop (generating charts for many users), this would cause an OOM (Out of Memory) error. `plt.close(fig)` releases the memory after each chart.
+
+---
+
+## Kubernetes CronJob for Batch Reporting
+
+### The Weekly Report Concept
+
+Every Monday at 9 AM UTC, the analytics CronJob:
+1. Queries all users
+2. For each user, counts tasks created in the last 7 days
+3. Generates a matplotlib bar chart
+4. Creates an in-app `Notification` record with the summary
+
+```yaml
+# helm-chart/templates/analytics/cronjob.yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "task-manager.fullname" . }}-weekly-report
+spec:
+  schedule: "{{ .Values.analytics.cronSchedule | default "0 9 * * 1" }}"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: report-generator
+              image: "{{ .Values.analytics.image.repository }}:{{ .Values.analytics.image.tag }}"
+              command: ["python", "-m", "scripts.weekly_report"]
+              env:
+                - name: DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "task-manager.fullname" . }}-secrets
+                      key: database-url
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+```
+
+### Cron Schedule Format
+
+```
+0 9 * * 1
+│ │ │ │ │
+│ │ │ │ └── Day of week (0=Sunday, 1=Monday, ..., 7=Sunday)
+│ │ │ └──── Month (1-12)
+│ │ └────── Day of month (1-31)
+│ └──────── Hour (0-23)
+└────────── Minute (0-59)
+```
+
+`0 9 * * 1` = Every Monday at 9:00 AM UTC.
+
+### `python -m scripts.weekly_report`
+
+The `command` overrides the Dockerfile's `CMD`. Instead of starting the FastAPI server (`uvicorn`), it runs the weekly report script:
+
+```bash
+python -m scripts.weekly_report
+```
+
+`-m` tells Python to run the module `scripts.weekly_report` (the file `scripts/weekly_report.py`). This is the Pythonic way to run a script that's part of a package.
+
+### The Report Script
+
+```python
+# services/analytics/scripts/weekly_report.py
+async def generate_reports():
+    conn = await asyncpg.connect(clean_db_url(DB_URL), statement_cache_size=0)
+
+    users = await conn.fetch('SELECT id, email, name FROM "User" WHERE email IS NOT NULL')
+
+    for user in users:
+        tasks = await conn.fetch(
+            'SELECT DATE("createdAt") as day, COUNT(*) as count '
+            'FROM "Task" WHERE "userId" = $1 '
+            'AND "createdAt" > NOW() - INTERVAL \'7 days\' '
+            'GROUP BY day ORDER BY day',
+            user["id"],
+        )
+
+        if not tasks:
+            continue
+
+        # Generate chart...
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax.bar(days, counts, color="#3b82f6")
+        # ...
+
+        # Create notification in the database
+        await conn.execute(
+            'INSERT INTO "Notification" ("id", "userId", "type", "message", "read", "createdAt") '
+            'VALUES ($1, $2, $3, $4, false, NOW())',
+            f"weekly-report-{user['id']}-{asyncio.get_event_loop().time()}",
+            user["id"],
+            "weekly_report",
+            f"Weekly summary: {sum(counts)} tasks created in the last 7 days.",
+        )
+
+    await conn.close()
+    print(f"[weekly-report] Done — {reports_generated} reports generated")
+```
+
+### Key Design Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| `concurrencyPolicy: Forbid` | Don't run two reports simultaneously (data safety) |
+| `restartPolicy: OnFailure` | Retry once if the script crashes (not `Always` — it's a batch job, not a server) |
+| `successfulJobsHistoryLimit: 3` | Keep last 3 successful runs for debugging |
+| `failedJobsHistoryLimit: 5` | Keep last 5 failures for investigation |
+| Single connection (not pool) | Batch job — one connection is sufficient |
+| Skip users with no tasks | Don't create notifications for inactive users |
+
+### Reusing the Same Docker Image
+
+The CronJob uses the **same Docker image** as the analytics Deployment. It just overrides the `command` to run the report script instead of the FastAPI server. This is efficient — one image, two workloads.
+
+### Manual Trigger
+
+```bash
+kubectl create job --from=cronjob/task-manager-weekly-report manual-report -n task-manager
+kubectl logs job/manual-report -n task-manager
+```
+
+`--from=cronjob/...` creates a one-time Job using the CronJob's template. Useful for testing without waiting for Monday.
+
+---
+
+## Analytics API Proxy Pattern
+
+### The Architecture
+
+```
+Browser → /api/stats (Next.js) → /stats/summary/{id} + /stats/productivity/{id} (Python)
+                ↑ auth()                      ↑ no auth (internal only)
+```
+
+The browser never talks to the Python service directly. Instead:
+
+1. Browser calls `/api/stats` on the Next.js app
+2. Next.js verifies the user's session (`auth()`)
+3. Next.js extracts the user ID and forwards it to the Python service
+4. Python service returns raw stats (no authentication — it's internal)
+5. Next.js returns the combined data to the browser
+
+### Why a Proxy?
+
+| Without Proxy | With Proxy |
+|---------------|------------|
+| Browser calls Python directly | Browser calls Next.js |
+| Python service exposed to internet | Python service is internal-only (ClusterIP) |
+| Python must authenticate users | Next.js handles auth (already has NextAuth) |
+| CORS issues (cross-origin) | Same-origin (no CORS) |
+| User can query other users' stats | User can only see their own stats |
+
+### The Proxy Implementation
+
+```typescript
+// src/app/api/stats/route.ts
+export async function GET() {
+  // 1. Authenticate
+  const session = await auth();
+  if (!session?.user?.id) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  // 2. Check if analytics service is configured
+  const analyticsUrl = process.env.ANALYTICS_URL;
+  if (!analyticsUrl) {
+    return NextResponse.json(
+      { error: "Analytics service not configured" },
+      { status: 503 }
+    );
+  }
+
+  // 3. Fetch from analytics service (parallel requests)
+  try {
+    const [summaryRes, productivityRes] = await Promise.all([
+      fetch(`${analyticsUrl}/stats/summary/${session.user.id}`),
+      fetch(`${analyticsUrl}/stats/productivity/${session.user.id}`),
+    ]);
+
+    const summary = await summaryRes.json();
+    const productivity = await productivityRes.json();
+
+    return NextResponse.json({ summary, productivity });
+  } catch {
+    return NextResponse.json(
+      { error: "Failed to fetch analytics" },
+      { status: 502 }
+    );
+  }
+}
+```
+
+### `Promise.all` for Parallel Fetches
+
+The proxy makes **two requests** to the analytics service (summary + productivity). Using `Promise.all` runs them in parallel:
+
+```typescript
+const [summaryRes, productivityRes] = await Promise.all([
+  fetch(`${analyticsUrl}/stats/summary/${session.user.id}`),
+  fetch(`${analyticsUrl}/stats/productivity/${session.user.id}`),
+]);
+```
+
+If these were sequential (`await` one, then the other), the total time would be `t1 + t2`. With `Promise.all`, it's `max(t1, t2)` — roughly twice as fast.
+
+### Security Boundary
+
+The user ID is injected server-side:
+
+```typescript
+fetch(`${analyticsUrl}/stats/summary/${session.user.id}`)
+//                                    ^^^^^^^^^^^^^^^^
+//                                    From session, not from request
+```
+
+The browser never controls which user ID is queried. Even if a malicious user modifies the fetch URL, they can't query another user's stats because the ID comes from the authenticated session.
+
+---
+
+## Dashboard Widget Integration
+
+### The StatsWidget Component
+
+```typescript
+// src/components/StatsWidget.tsx
+"use client";
+
+import { useEffect, useState } from "react";
+
+export default function StatsWidget() {
+  const [data, setData] = useState<StatsData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
+
+  useEffect(() => {
+    async function load() {
+      try {
+        const res = await fetch("/api/stats");
+        if (res.ok) {
+          setData(await res.json());
+        } else {
+          setError(true);
+        }
+      } catch {
+        setError(true);
+      } finally {
+        setLoading(false);
+      }
+    }
+    load();
+  }, []);
+
+  if (loading) return <div>Loading analytics...</div>;
+  if (error || !data?.summary) return null;  // Hide widget if analytics unavailable
+
+  return (
+    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      {/* Total Tasks */}
+      {/* Completed Tasks */}
+      {/* Completion Rate */}
+      {/* By Priority breakdown */}
+    </div>
+  );
+}
+```
+
+### Three UI States
+
+| State | Condition | What Shows |
+|-------|-----------|------------|
+| Loading | `loading === true` | "Loading analytics..." placeholder |
+| Error | `error === true \|\| !data?.summary` | `null` (widget hidden — analytics not deployed) |
+| Success | `data.summary` exists | Grid of stat cards |
+
+### Graceful Absence
+
+```typescript
+if (error || !data?.summary) {
+  return null;  // Render nothing
+}
+```
+
+If the analytics service is not deployed (no `ANALYTICS_URL`), `/api/stats` returns 503, `error` becomes true, and the widget simply doesn't render. The dashboard works fine without it — analytics is an enhancement, not a requirement.
+
+### Responsive Grid Layout
+
+```tsx
+<div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+```
+
+| Screen Size | Columns |
+|-------------|---------|
+| Mobile (< 640px) | 1 column |
+| Small (≥ 640px) | 2 columns |
+| Large (≥ 1024px) | 4 columns |
+
+This uses Tailwind CSS v4 responsive prefixes: `sm:` and `lg:`.
+
+### Data Structure
+
+```typescript
+interface StatsData {
+  summary: {
+    statusCounts: Record<string, number>;     // { "TODO": 5, "COMPLETED": 10 }
+    completionRate: number;                    // 66.7
+    totalTasks: number;                        // 15
+    completedTasks: number;                    // 10
+    dailyHistory: { date: string; count: number }[];  // Last 30 days
+  } | null;
+  productivity: {
+    byPriority: {
+      priority: string;      // "HIGH"
+      total: number;         // 5
+      completed: number;     // 3
+      rate: number;          // 60.0
+    }[];
+  } | null;
+}
+```
+
+The `| null` on `summary` and `productivity` allows partial data — if one endpoint fails, the other might still work.
+
+---
+
+## Graceful Degradation for Optional Services
+
+### The Philosophy
+
+All microservices in this project are **optional** — the main app works without any of them. Each service is behind a feature flag (`enabled` in Helm values) and the main app checks for the service's URL before using it.
+
+### Pattern: Conditional URL Check
+
+Every integration follows the same pattern:
+
+```typescript
+// Realtime
+const REALTIME_URL = process.env.REALTIME_URL;
+if (!REALTIME_URL) return;  // Skip silently
+
+// Analytics
+const analyticsUrl = process.env.ANALYTICS_URL;
+if (!analyticsUrl) {
+  return NextResponse.json({ error: "Not configured" }, { status: 503 });
+}
+```
+
+### Pattern: Silent Failure
+
+```typescript
+// Realtime — fire-and-forget
+try {
+  await fetch(`${REALTIME_URL}/emit`, { ... });
+} catch {
+  // Silent fail — realtime is a best-effort enhancement
+}
+```
+
+### Pattern: Conditional UI
+
+```typescript
+// StatsWidget — returns null if analytics unavailable
+if (error || !data?.summary) return null;
+```
+
+### Pattern: Conditional Helm Rendering
+
+In Kubernetes, services are only deployed when enabled:
+
+```yaml
+{{- if .Values.realtime.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+# ...
+{{- end }}
+```
+
+And environment variables are only injected when the dependency is enabled:
+
+```yaml
+{{- if .Values.realtime.enabled }}
+- name: REALTIME_URL
+  value: "http://{{ include "task-manager.fullname" . }}-realtime:3001"
+{{- end }}
+```
+
+### Why This Matters
+
+| Without Graceful Degradation | With Graceful Degradation |
+|------------------------------|--------------------------|
+| Main app crashes if a service is down | Main app works — just missing a feature |
+| Must deploy all services at once | Deploy incrementally (one service at a time) |
+| One failure cascades to all users | Failures are isolated per feature |
+| Hard to develop locally | Develop with only the services you need |
+
+This is a **core microservices principle**: services should be independent. A failure in one service should not bring down the entire system.
+
+---
+
+## Phase 3 Key Patterns and Best Practices
+
+### Key Patterns:
+- WebSocket as bidirectional, persistent communication channel
+- Socket.io rooms for targeted event broadcasting
+- Handshake-based WebSocket authentication (`auth` field)
+- JWT decryption across services (shared `NEXTAUTH_SECRET`)
+- NGINX Ingress longest-prefix match for path routing
+- NGINX WebSocket timeout configuration (`proxy-read/send-timeout: 3600`)
+- Kubernetes `sessionAffinity: ClientIP` for stateful connections
+- Fire-and-forget inter-service communication (best-effort)
+- Frontend Socket.io client with auto-reconnect
+- Polyglot services sharing a database (not types)
+- Python `pip install --user` for clean Docker multi-stage builds
+- ASGI (async) vs WSGI (sync) server models
+- `statement_cache_size=0` for asyncpg + PgBouncer compatibility
+- DATABASE_URL cleaning for driver compatibility
+- matplotlib headless rendering (`Agg` backend + `BytesIO`)
+- Same Docker image for server + CronJob (override `command`)
+- API proxy pattern for auth-scoped service access
+- `Promise.all` for parallel internal API calls
+- Graceful degradation for all optional services
+
+### Best Practices:
+- Use Socket.io over raw WebSocket for rooms, reconnection, and fallback
+- Store user identity on `socket.data` during auth middleware
+- Share `NEXTAUTH_SECRET` across all services that need JWT verification
+- Set NGINX WebSocket timeouts to match your max expected session duration
+- Use `sessionAffinity: ClientIP` only for stateful services (WebSocket)
+- Make real-time updates fire-and-forget (never block on them)
+- Use refs in React to avoid stale closures in socket event handlers
+- Clean up socket connections on component unmount
+- Choose the right language per service (Python for analytics, Node.js for I/O)
+- Use `PYTHONUNBUFFERED=1` in all Python containers for real-time logs
+- Call `plt.close(fig)` after each chart to prevent memory leaks
+- Override CronJob `command` to reuse the same image for batch jobs
+- Proxy all external service access through the authenticated main app
+- Return `null` from UI widgets when their backing service is unavailable
+- Check for service URLs (`if (!URL) return`) before making internal calls
+
+---
+
+## Phase 3 Troubleshooting
+
+### WebSocket Not Connecting
+
+**Symptom**: Frontend shows "Live" badge never appears, `socket.on("connect")` never fires.
+
+**Diagnosis**:
+```bash
+# Check if realtime pod is running
+kubectl get pods -n task-manager -l app.kubernetes.io/component=realtime
+
+# Check realtime logs
+kubectl logs deployment/task-manager-realtime -n task-manager
+
+# Check if /socket.io path is in the Ingress
+kubectl get ingress -n task-manager -o yaml | grep socket.io
+```
+
+**Common causes**:
+- `realtime.enabled` is false in Helm values (path not in Ingress)
+- `NEXTAUTH_SECRET` mismatch between main app and realtime (JWT decryption fails)
+- NGINX timeout annotations not set (connection dropped after 60s)
+
+### JWT Decryption Fails
+
+**Symptom**: Realtime logs show "Invalid token" for every connection attempt.
+
+**Diagnosis**:
+```bash
+# Compare secrets
+kubectl exec deployment/task-manager -n task-manager -- printenv NEXTAUTH_SECRET
+kubectl exec deployment/task-manager-realtime -n task-manager -- printenv NEXTAUTH_SECRET
+```
+
+**Fix**: Both must be identical. If different, update the realtime deployment:
+```bash
+helm upgrade task-manager ./task-manager/helm-chart --namespace task-manager --reuse-values
+```
+
+### Python Service Crash on Startup
+
+**Symptom**: Analytics pod crashes immediately, `CrashLoopBackOff`.
+
+**Diagnosis**:
+```bash
+kubectl logs deployment/task-manager-analytics -n task-manager
+```
+
+**Common causes**:
+- `DATABASE_URL` not set (check Secret)
+- asyncpg can't connect (check network, pgbouncer URL)
+- `PYTHONUNBUFFERED` not set (no logs visible — can't diagnose)
+
+### asyncpg "prepared statement does not exist"
+
+**Symptom**: Analytics requests fail with `InvalidSQLStatementNameError`.
+
+**Cause**: Forgot `statement_cache_size=0` — asyncpg uses prepared statements that PgBouncer doesn't support.
+
+**Fix**: Ensure `statement_cache_size=0` in both `create_pool()` and `connect()` calls.
+
+### CronJob Not Running
+
+**Symptom**: Weekly report never generates.
+
+**Diagnosis**:
+```bash
+# Check CronJob exists
+kubectl get cronjob -n task-manager
+
+# Check job history
+kubectl get jobs -n task-manager
+
+# Trigger manually to test
+kubectl create job --from=cronjob/task-manager-weekly-report manual-report -n task-manager
+kubectl logs job/manual-report -n task-manager
+```
+
+**Common causes**:
+- `analytics.enabled` is false (CronJob not deployed)
+- Timezone difference (schedule is in UTC — `0 9 * * 1` is 9 AM UTC, not local time)
+
+### matplotlib "no display name"
+
+**Symptom**: Weekly report crashes with `TclError: no display name`.
+
+**Cause**: Forgot `matplotlib.use("Agg")` before importing `pyplot`.
+
+**Fix**: Ensure the import order:
+```python
+import matplotlib
+matplotlib.use("Agg")  # MUST be first
+import matplotlib.pyplot as plt
+```
+
+### Realtime Events Not Reaching Browser
+
+**Symptom**: Task created/updated but browser doesn't update until manual refresh.
+
+**Diagnosis**:
+1. Check realtime pod received the `/emit` POST:
+```bash
+kubectl exec deployment/task-manager -n task-manager -- node -e "fetch('http://task-manager-realtime:3001/emit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({event:'test:event',room:'board',data:{hello:'world'}})}).then(r=>r.json()).then(j=>console.log(j))"
+```
+
+2. Check `REALTIME_URL` is set on the main app:
+```bash
+kubectl exec deployment/task-manager -n task-manager -- printenv REALTIME_URL
+```
+
+3. Check browser console for socket errors
+
+**Common causes**:
+- `REALTIME_URL` not injected (conditional Helm block not rendered)
+- `emitToRealtime` swallowing errors silently (by design — check logs manually)
+- Socket disconnected (check "Live" badge)
+
+---
+
+## What You've Learned in Stage 2 - Phase 3
+
+### Technologies Mastered:
+- WebSocket protocol (bidirectional, persistent connections)
+- Socket.io (rooms, broadcasting, auto-reconnect, event-based API)
+- `socket.io-client` (frontend WebSocket library)
+- `jose` library (JWT encryption/decryption)
+- NextAuth JWT session encryption (JWE format)
+- NGINX Ingress WebSocket routing (path-based, timeout annotations)
+- Kubernetes `sessionAffinity: ClientIP` (sticky sessions)
+- Fire-and-forget inter-service communication
+- Python 3.12 / FastAPI (polyglot web framework)
+- Uvicorn ASGI server
+- asyncpg (async PostgreSQL driver)
+- PgBouncer prepared statement compatibility
+- matplotlib headless rendering (`Agg` backend)
+- `io.BytesIO` for in-memory image generation
+- Python Docker multi-stage builds (`pip install --user`)
+- Kubernetes CronJob for batch reporting
+- API proxy pattern (auth-scoped service access)
+- `Promise.all` for parallel API calls
+
+### Core Concepts:
+- HTTP vs WebSocket (request/response vs persistent bidirectional)
+- Socket.io rooms (named groups for targeted broadcasting)
+- WebSocket authentication (handshake `auth` field vs HTTP headers)
+- Encrypted JWT (JWE) vs signed JWT (JWS)
+- Shared secret as trust boundary between services
+- NGINX longest-prefix match (path routing priority)
+- Session affinity for stateful connections (WebSocket sticky sessions)
+- Fire-and-forget as a reliability trade-off (simplicity > guaranteed delivery)
+- Polyglot architecture (right language for the job)
+- Shared database as cross-language contract (not shared types)
+- ASGI vs WSGI (async vs sync Python web servers)
+- Connection poolers and prepared statement incompatibility
+- Headless rendering (no display server needed)
+- Docker image reuse across workloads (server + CronJob)
+- API proxy as security boundary (user can't bypass auth)
+- Graceful degradation (all services are optional)
+
+### Best Practices:
+- Use Socket.io rooms instead of manual client tracking
+- Share `NEXTAUTH_SECRET` across all services for JWT verification
+- Set NGINX WebSocket timeouts to match session duration
+- Only use `sessionAffinity` for stateful services
+- Never block on real-time updates (fire-and-forget)
+- Use refs in React to avoid stale closures in long-lived socket handlers
+- Clean up socket connections on component unmount
+- Choose Python for data analysis (matplotlib, pandas ecosystem)
+- Always set `PYTHONUNBUFFERED=1` in Python containers
+- Use `statement_cache_size=0` with asyncpg + PgBouncer
+- Call `plt.close(fig)` after each chart in loops
+- Reuse Docker images across workloads (override command)
+- Proxy external service access through authenticated main app
+- Return `null` from widgets when backing service is unavailable
+- Check for service URLs before making internal calls
+
+### Troubleshooting Skills:
+- Debugging WebSocket connection failures
+- Diagnosing JWT decryption mismatches across services
+- Fixing asyncpg/PgBouncer prepared statement errors
+- Resolving matplotlib headless rendering crashes
+- Debugging CronJob execution (manual triggering, log inspection)
+- Tracing event flow (main app → /emit → socket → browser)
+- Diagnosing NGINX WebSocket routing issues
+- Debugging Python service startup failures in Kubernetes
