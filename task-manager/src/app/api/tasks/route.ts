@@ -5,6 +5,7 @@ import { taskCreateSchema } from "@/lib/validations";
 import { observeRequest, trackTaskOperation } from "@/lib/metrics";
 import logger from "@/lib/logger";
 import { emitToRealtime } from "@/lib/realtime";
+import { triggerWebhook } from "@/lib/webhook";
 
 export async function GET() {
   const start = Date.now();
@@ -70,6 +71,7 @@ export async function POST(req: Request) {
     logger.info({ taskId: task.id, userId: session.user.id }, "Task created");
     observeRequest("POST", "/api/tasks", 201, (Date.now() - start) / 1000);
     emitToRealtime("task:created", task);
+    triggerWebhook("task.created", task, session.user.id);
     return NextResponse.json(task, { status: 201 });
   } catch (err) {
     trackTaskOperation("create", "error");

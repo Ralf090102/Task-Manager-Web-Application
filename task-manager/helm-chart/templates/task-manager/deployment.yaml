@@ -61,6 +61,10 @@ spec:
             - name: ANALYTICS_URL
               value: "http://{{ include "task-manager.fullname" . }}-analytics:8000"
             {{- end }}
+            {{- if .Values.webhook.enabled }}
+            - name: WEBHOOK_URL
+              value: "http://{{ include "task-manager.fullname" . }}-webhook:3003"
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /
