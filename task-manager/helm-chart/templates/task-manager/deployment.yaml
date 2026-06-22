@@ -65,6 +65,10 @@ spec:
             - name: WEBHOOK_URL
               value: "http://{{ include "task-manager.fullname" . }}-webhook:3003"
             {{- end }}
+            {{- if .Values.teamService.enabled }}
+            - name: TEAM_SERVICE_URL
+              value: "http://{{ include "task-manager.fullname" . }}-team-service:3002"
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /

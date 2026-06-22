@@ -1,0 +1,32 @@
+{{- if .Values.teamService.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "task-manager.fullname" . }}-db-migration
+  labels:
+    {{- include "task-manager.labels" . | nindent 4 }}
+    app.kubernetes.io/component: team-service
+  annotations:
+    "helm.sh/hook": pre-upgrade,pre-install
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  template:
+    metadata:
+      labels:
+        {{- include "task-manager.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: team-service
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: migrate
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["npx", "prisma", "db", "push", "--accept-data-loss"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "task-manager.fullname" . }}-secrets
+                  key: database-url
+{{- end }}
