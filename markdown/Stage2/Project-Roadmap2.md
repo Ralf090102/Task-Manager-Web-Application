@@ -1894,26 +1894,38 @@ kubectl exec deployment/task-manager -n task-manager -- ^
 
 ### Multi-Image Docker Build
 
-Update `.github/workflows/ci.yml` to build all service images:
+Update `.github/workflows/ci.yml` to build all service images in parallel:
 
 ```yaml
 docker:
-  name: Docker Build & Push
+  name: Build & Push Docker Image
   runs-on: ubuntu-latest
   needs: [quality, security]
-  if: github.event_name != 'pull_request'
+  if: github.event_name == 'push'
+
   strategy:
+    fail-fast: false
     matrix:
-      service:
-        - task-manager-app
-        - notification-service
-        - file-service
-        - analytics-service
-        - realtime-service
-        - search-sync-service
-        - webhook-service
-        - scheduler-service
-        - team-service
+      include:
+        - name: task-manager-app
+          dockerfile: Dockerfile
+        - name: scheduler-service
+          dockerfile: services/scheduler/Dockerfile
+        - name: notification-service
+          dockerfile: services/notification/Dockerfile
+        - name: file-service
+          dockerfile: services/file-service/Dockerfile
+        - name: search-sync-service
+          dockerfile: services/search-sync/Dockerfile
+        - name: realtime-service
+          dockerfile: services/realtime/Dockerfile
+        - name: analytics-service
+          dockerfile: services/analytics/Dockerfile
+        - name: webhook-service
+          dockerfile: services/webhook/Dockerfile
+        - name: team-service
+          dockerfile: services/team-service/Dockerfile
+
   steps:
     - uses: actions/checkout@v4
 
@@ -1926,16 +1938,31 @@ docker:
         username: ${{ secrets.DOCKER_USERNAME }}
         password: ${{ secrets.DOCKER_PASSWORD }}
 
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ secrets.DOCKER_USERNAME }}/${{ matrix.name }}
+        tags: |
+          type=sha
+          type=raw,value=latest,enable={{is_default_branch}}
+
     - name: Build and push
       uses: docker/build-push-action@v5
       with:
-        context: ./task-manager/services/${{ matrix.service }}
-        file: ./task-manager/services/${{ matrix.service }}/Dockerfile
+        context: ./task-manager
+        file: ./task-manager/${{ matrix.dockerfile }}
         push: true
-        tags: ralf090102/${{ matrix.service }}:latest
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
+        tags: ${{ steps.meta.outputs.tags }}
+        cache-from: type=gha,scope=${{ matrix.name }}
+        cache-to: type=gha,scope=${{ matrix.name }},mode=max
 ```
+
+**Key details:**
+- All images share `context: ./task-manager` (not per-service directories) — this is required because service Dockerfiles `COPY` from shared paths like `prisma/schema.prisma`
+- Each image has its own GHA cache `scope` to prevent cache collisions between services
+- `fail-fast: false` ensures one failing build doesn't cancel the others
+- Tags: `sha-<commit>` for traceability + `latest` on main branch only
 
 ### Required GitHub Secrets (additions)
 

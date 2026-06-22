@@ -7,14 +7,31 @@ This document outlines expansion modules that build upon the existing Task Manag
 ## Current Architecture (Baseline)
 
 ```
-Browser → NGINX Ingress → task-manager (Next.js) → PostgreSQL (Supabase)
-                                ↑
-                    Prometheus scrapes /api/metrics
+Browser → NGINX Ingress → task-manager (Next.js) ──→ PostgreSQL (Supabase)
+                              │  │  │  │
+                              │  │  │  └──→ team-service (Fastify, port 3002)
+                              │  │  └─────→ webhook-service (Fastify, port 3003) → background delivery loop
+                              │  └────────→ notification-service (Fastify, port 3004)
+                              └───────────→ file-service (Fastify, port 3005) → MinIO (StatefulSet)
+                                             search-sync (Fastify, port 3006) → Meilisearch (StatefulSet)
+                                             analytics (FastAPI, port 8000) — Python polyglot
+                                             realtime (Socket.io, port 3001) — WebSocket gateway
+
+CronJobs: task-scheduler (every minute)     │    weekly-report (Mondays 9 AM)
+                                           ↑
+                    Prometheus scrapes /api/metrics (monitoring namespace)
 ```
 
-**What exists:** Single Next.js pod, external PostgreSQL, Prometheus + Grafana monitoring, pino structured logging to stdout.
+**What exists (Stage 2 complete):**
+- 8 microservices (Node.js + Python polyglot) deployed as Deployments, StatefulSets, and CronJobs
+- External PostgreSQL (Supabase) shared across all services via Prisma
+- In-cluster stateful dependencies: MinIO (S3 storage) and Meilisearch (full-text search) as StatefulSets with PVCs
+- Prometheus + Grafana monitoring stack in `monitoring` namespace
+- pino structured JSON logging to stdout (all Node.js services)
+- CI/CD pipeline building 9 Docker images in parallel via matrix strategy
+- Fire-and-forget inter-service communication (webhook triggers, notification calls, realtime emits)
 
-**What's missing:** Log aggregation, caching, background processing, alerting, autoscaling, GitOps, progressive delivery.
+**What's still missing:** Log aggregation, Redis caching, queue-based background processing, alerting, autoscaling, GitOps, progressive delivery.
 
 ---
 
@@ -23,8 +40,8 @@ Browser → NGINX Ingress → task-manager (Next.js) → PostgreSQL (Supabase)
 | Module | Focus Area | New K8s Concepts | New Tooling |
 |--------|-----------|-----------------|-------------|
 | A | Log Aggregation | DaemonSet, ConfigMap | Loki, Promtail |
-| B | Redis Caching | StatefulSet, PVC, Headless Service | Redis |
-| C | Worker Microservice | Multi-pod Deployments, Subcharts | BullMQ |
+| B | Redis Caching | Cache-aside pattern, TTL strategy | Redis |
+| C | Worker Microservice | Message queue, Helm subcharts | BullMQ |
 | D | Alerting | PrometheusRule CRD | Alertmanager |
 | E | Autoscaling | HPA with Custom Metrics | Prometheus Adapter, k6 |
 | F | GitOps | ArgoCD Application CRD | ArgoCD |
@@ -37,7 +54,7 @@ Each module can be implemented independently, but they are ordered by dependency
 ## Module A: Log Aggregation with Loki
 
 ### Problem
-Currently, pino logs go to pod stdout and are only viewable via `kubectl logs`. There is no way to search, filter, or correlate logs with metrics. If a pod restarts, its previous logs are lost.
+With 10+ pods across 8 microservices (Stage 2), pino logs go to each pod's stdout and are only viewable individually via `kubectl logs`. There is no way to search across all services, filter by log level, or correlate logs from multiple services during an incident (e.g., tracing a request from the main app → webhook service → notification service). If a pod restarts, its previous logs are lost.
 
 ### Solution
 Add **Loki** (log aggregation database) and **Promtail** (log collector agent) to the monitoring stack. Logs flow alongside metrics into Grafana, giving you a unified observability dashboard.
@@ -109,11 +126,11 @@ Browser → task-manager → Redis (cache)  → MISS → PostgreSQL → write ba
 ```
 
 ### What You'll Learn
-- **StatefulSet**: Like a Deployment but with stable network identity and persistent storage — essential for stateful applications like databases and caches
-- **PersistentVolumeClaim (PVC)**: Requests durable storage that survives pod restarts
-- **Headless Service**: A Service without cluster-IP, used for StatefulSet DNS resolution (`redis-0.redis.task-manager.svc.cluster.local`)
+- **Redis StatefulSet**: Apply the StatefulSet pattern from Stage 2 (MinIO, Meilisearch) to a new stateful workload — this is your third StatefulSet type
 - **Cache-aside pattern**: Application checks cache first, then database, then writes result back to cache
 - **Cache invalidation**: Clearing cached data when tasks are created/updated/deleted
+- **TTL strategy**: Balancing freshness vs. performance with expiry times
+- **Foundation for Module C**: Redis is required by the BullMQ worker queue in Module C
 
 ### Implementation Steps
 
@@ -212,10 +229,10 @@ await redis.del(`tasks:${session.user.id}`);
 ## Module C: Background Worker Microservice
 
 ### Problem
-The Next.js app handles everything synchronously: user requests, database queries, email notifications. Heavy operations block the event loop and degrade user experience.
+Stage 2 already introduced several background processing patterns: the webhook service has a polling-based delivery loop, the scheduler is a CronJob, and the analytics weekly report runs on a schedule. However, these are isolated — there's no centralized job queue. The Next.js app still handles some work synchronously (email notifications, search index updates) via fire-and-forget HTTP calls that can silently fail.
 
 ### Solution
-Extract background processing into a **separate worker microservice**. Use Redis (from Module B) as a job queue with BullMQ. The worker watches for task events (completion, overdue checks, daily summaries) and processes them asynchronously.
+Introduce a **queue-based worker microservice** using BullMQ (Redis-backed job queue). The main app enqueues jobs (task completed, send summary, check overdue) instead of making fire-and-forget HTTP calls. A dedicated worker pod consumes jobs with retries, delays, and priority — more reliable than the fire-and-forget pattern used for notifications and webhooks in Stage 2.
 
 ### Architecture
 ```
@@ -224,7 +241,7 @@ task-manager (Next.js)
   ├── enqueue job ──→ Redis (BullMQ queue)
   │                        │
   │                   worker-service (separate pod)
-  │                        ├── send notification email
+  │                        ├── send notification email (retries on failure)
   │                        ├── generate daily summary
   │                        └── check overdue tasks
   │
@@ -232,11 +249,10 @@ task-manager (Next.js)
 ```
 
 ### What You'll Learn
-- **Multi-service Kubernetes deployment**: Running and coordinating multiple deployments that share infrastructure
-- **Helm subcharts / umbrella chart**: Managing the task-manager, worker, and Redis as a coordinated unit
-- **Producer-consumer pattern**: Web app enqueues jobs, worker consumes them
-- **Shared configuration**: Both services read from the same Secrets/ConfigMaps
-- **Pod isolation**: Worker crash doesn't affect web app, and vice versa
+- **Message queue pattern**: Contrast with the fire-and-forget HTTP calls used for webhook/notification/realtime triggers in Stage 2 — queues add durability, retries, and visibility
+- **Producer-consumer with BullMQ**: Web app enqueues jobs, worker consumes them; jobs survive pod restarts
+- **Helm subcharts / umbrella chart**: Restructuring the monolithic multi-service chart into a parent + subcharts organization
+- **Shared infrastructure**: Both web app and worker read from the same Redis instance (from Module B) and the same PostgreSQL
 
 ### Implementation Steps
 
@@ -361,7 +377,7 @@ spec:
   groups:
     - name: task-manager
       rules:
-        # Alert: High error rate
+        # Alert: High error rate on main app
         - alert: HighErrorRate
           expr: |
             rate(http_request_duration_seconds_count{status_code=~"5.."}[5m]) /
@@ -373,23 +389,43 @@ spec:
             summary: "Error rate above 10%"
             description: "{{ $labels.route }} is returning >10% 5xx errors"
 
-        # Alert: Pod crash looping
+        # Alert: Pod crash looping (any service)
         - alert: PodCrashLooping
           expr: rate(kube_pod_container_status_restarts_total[15m]) > 0
           for: 5m
           labels:
             severity: warning
           annotations:
-            summary: "Pod is restarting repeatedly"
+            summary: "Pod {{ $labels.pod }} is restarting repeatedly"
 
-        # Alert: No successful scrapes
-        - alert: PrometheusTargetDown
-          expr: up{job="task-manager"} == 0
+        # Alert: Any service target down
+        - alert: ServiceTargetDown
+          expr: up{namespace="task-manager"} == 0
           for: 2m
           labels:
             severity: critical
           annotations:
-            summary: "Prometheus cannot scrape task-manager"
+            summary: "Prometheus cannot scrape {{ $labels.job }}"
+
+        # Alert: StatefulSet PVC nearly full (MinIO, Meilisearch)
+        - alert: PersistentVolumeAlmostFull
+          expr: |
+            kubelet_volume_stats_used_bytes{namespace="task-manager"}
+            / kubelet_volume_stats_capacity_bytes{namespace="task-manager"} > 0.85
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "PVC {{ $labels.persistentvolumeclaim }} is >85% full"
+
+        # Alert: Webhook delivery failures piling up
+        - alert: WebhookDeliveryBacklog
+          expr: webhook_deliveries_pending > 50
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Webhook delivery backlog growing (>50 pending)"
 ```
 
 2. **Configure Alertmanager** (add notification receivers)
@@ -416,10 +452,10 @@ receivers:
 ## Module E: Horizontal Pod Autoscaler
 
 ### Problem
-The app runs with a fixed replica count (1). Under load, requests queue up. In production, you want the cluster to automatically scale pods based on demand.
+The main app and all microservices run with fixed replica counts (1 each). Under load, requests queue up. In production, you want the cluster to automatically scale stateless services based on demand — the main app and realtime gateway are prime candidates. StatefulSet services (MinIO, Meilisearch) do not benefit from HPA.
 
 ### Solution
-Install **Prometheus Adapter** (exposes custom metrics to the Kubernetes API). Configure **HPA** to scale based on HTTP request rate, not just CPU usage.
+Install **Prometheus Adapter** (exposes custom metrics to the Kubernetes API). Configure **HPA** to scale the main app and realtime service based on HTTP request rate and WebSocket connections, not just CPU usage.
 
 ### What You'll Learn
 - **HPA with custom metrics**: Scaling based on application-specific metrics (QPS) instead of just CPU
@@ -495,13 +531,14 @@ kubectl get hpa -n task-manager -w
 Deployments are manual: build image, run `helm upgrade`. There's no audit trail of what changed when, and no automatic rollback on failure.
 
 ### Solution
-Install **ArgoCD** in the cluster. Point it at your GitHub repo. Every `git push` to main triggers an automatic Helm release sync. Git becomes the single source of truth for cluster state.
+Install **ArgoCD** in the cluster. Point it at your GitHub repo. Every `git push` to main triggers an automatic Helm release sync. Git becomes the single source of truth for cluster state — including all 9 Docker images, 8 services, 2 StatefulSets, and CronJobs managed by the Stage 2 Helm chart.
 
 ### What You'll Learn
 - **GitOps principles**: Declarative state, pull-based deployment, automatic drift detection
 - **ArgoCD Application CRD**: Defines what to sync and where
-- **Sync waves**: Ordered resource creation (e.g., Secrets before Deployments)
+- **Sync waves**: Ordered resource creation (e.g., Secrets + DB migration hook before Deployments)
 - **Self-healing**: ArgoCD detects manual `kubectl edit` changes and reverts them
+- **Image automation**: ArgoCD Image Updater can automatically bump image tags in git when new images are pushed to Docker Hub — critical with 9 images that change independently
 
 ### Implementation Steps
 
@@ -632,7 +669,7 @@ Module A (Loki)         ← Quickest win, directly enhances logging
     ↓
 Module B (Redis)        ← Foundation for Module C
     ↓
-Module C (Worker)       ← Most complex app change, multi-service K8s
+Module C (Worker)       ← Queue-based processing, Helm subcharts
     ↓
 Module D (Alerting)     ← Builds on existing Prometheus metrics
     ↓
@@ -649,12 +686,12 @@ Module G (Canary)       ← Most advanced, requires GitOps + metrics
 
 ## Resume Impact
 
-After completing these modules, you can add the following to your resume:
+These modules build on the Stage 2 microservices architecture (8 services, polyglot, StatefulSets, CronJobs). After completing them, you can add the following to your resume:
 
-- **Microservices architecture**: Split monolith into web + worker services with shared Redis queue
-- **Stateful workloads**: Managed Redis StatefulSet with persistent volumes in Kubernetes
-- **Full observability stack**: Prometheus + Grafana + Loki for metrics, dashboards, and log aggregation
-- **Proactive alerting**: Custom PrometheusRules with Alertmanager notification routing
-- **Autoscaling**: HPA with custom Prometheus metrics via Prometheus Adapter
-- **GitOps**: ArgoCD for declarative, pull-based continuous deployment
-- **Progressive delivery**: Canary deployments with automated metric-based rollback
+- **Full observability stack**: Extended Prometheus + Grafana monitoring with Loki log aggregation — unified metrics, logs, and dashboards across all microservices
+- **Cache layer**: Redis StatefulSet with cache-aside pattern and TTL-based invalidation, reducing PostgreSQL load
+- **Queue-based processing**: BullMQ worker service contrasting with the fire-and-forget HTTP pattern — adds durability, retries, and job visibility
+- **Proactive alerting**: Custom PrometheusRules with Alertmanager routing for multi-service health (error rates, PVC capacity, webhook backlogs)
+- **Custom-metric autoscaling**: HPA scaling stateless services based on application QPS via Prometheus Adapter
+- **GitOps**: ArgoCD managing the full multi-service Helm chart — 9 images, conditional service templates, Helm hooks
+- **Progressive delivery**: Canary deployments with automated metric-based rollback for zero-downtime releases
