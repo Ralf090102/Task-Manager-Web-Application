@@ -16,6 +16,15 @@ export default function Navbar() {
           TaskManager
         </Link>
 
+        {session && (
+          <Link
+            href="/teams"
+            className="ml-6 text-sm font-medium text-zinc-600 transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
+          >
+            Teams
+          </Link>
+        )}
+
         <div className="flex items-center gap-4">
           {status === "loading" ? (
             <div className="h-4 w-20 animate-pulse rounded bg-zinc-200 dark:bg-zinc-700" />
