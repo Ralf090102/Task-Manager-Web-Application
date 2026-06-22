@@ -19,6 +19,23 @@ enum TaskPriority {
   HIGH
 }
 
+enum MemberRole {
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+enum ActivityType {
+  TASK_CREATED
+  TASK_UPDATED
+  TASK_COMPLETED
+  TASK_DELETED
+  TASK_ASSIGNED
+  MEMBER_JOINED
+  MEMBER_LEFT
+  BOARD_CREATED
+}
+
 model User {
   id            String    @id @default(cuid())
   name          String?
@@ -32,6 +49,10 @@ model User {
   recurringTasks RecurringTask[]
   notifications  Notification[]
   webhooks       Webhook[]
+  ownedTeams     Team[]      @relation("TeamOwner")
+  memberships    Member[]
+  assignedTasks  Task[]    @relation("TaskAssignee")
+  activities     Activity[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -89,6 +110,10 @@ model Task {
   userId      String
   user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   attachments Attachment[]
+  boardId     String?
+  board       Board?       @relation(fields: [boardId], references: [id], onDelete: SetNull)
+  assigneeId  String?
+  assignee    User?        @relation("TaskAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -97,6 +122,8 @@ model Task {
   @@index([status])
   @@index([createdAt])
   @@index([dueDate])
+  @@index([boardId])
+  @@index([assigneeId])
 }
 
 model Attachment {
@@ -178,4 +205,62 @@ model WebhookDelivery {
   @@index([webhookId])
   @@index([status])
   @@index([nextRetryAt])
+}
+
+model Team {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  ownerId   String
+  owner     User     @relation("TeamOwner", fields: [ownerId], references: [id])
+  members   Member[]
+  boards    Board[]
+  activities Activity[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([ownerId])
+}
+
+model Member {
+  id       String     @id @default(cuid())
+  teamId   String
+  team     Team       @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  userId   String
+  user     User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role     MemberRole @default(MEMBER)
+  joinedAt DateTime   @default(now())
+
+  @@unique([teamId, userId])
+  @@index([userId])
+}
+
+model Board {
+  id        String   @id @default(cuid())
+  teamId    String
+  team      Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  name      String
+  color     String   @default("#3b82f6")
+  tasks     Task[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([teamId])
+}
+
+model Activity {
+  id        String       @id @default(cuid())
+  teamId    String
+  team      Team         @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      ActivityType
+  taskId    String?
+  metadata  Json?
+
+  createdAt DateTime     @default(now())
+
+  @@index([teamId, createdAt])
 }
