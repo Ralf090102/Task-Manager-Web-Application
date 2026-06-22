@@ -88,8 +88,12 @@ Uses Tailwind v4 with new `@import "tailwindcss"` syntax in `globals.css`. Do NO
 - Three jobs: `quality` → `security` → `docker`
 - **quality**: lint, type-check, test (runs on every push and PR to main)
 - **security**: npm audit + Trivy filesystem scan (runs in parallel with quality)
-- **docker**: build + push to Docker Hub (only on main push, after quality + security pass)
-- Docker build context: `./task-manager`
+- **docker**: matrix build + push all 9 images to Docker Hub (only on main push, after quality + security pass)
+- All 9 images built in parallel via matrix strategy (`fail-fast: false`)
+- Images: `task-manager-app`, `scheduler-service`, `notification-service`, `file-service`, `search-sync-service`, `realtime-service`, `analytics-service`, `webhook-service`, `team-service`
+- Docker build context: `./task-manager` for all images; `file` varies per service
+- Each image has its own GHA cache scope (`cache-from`/`cache-to` with `scope=<name>`)
+- Tags per image: `sha-<commit>` + `latest` (on main branch only)
 - Required GitHub secrets: `DOCKER_USERNAME`, `DOCKER_PASSWORD`
 
 ## Authentication

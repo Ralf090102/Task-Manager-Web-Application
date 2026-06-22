@@ -2,9 +2,9 @@ name: CI Pipeline
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
 
 defaults:
   run:
@@ -78,6 +78,29 @@ jobs:
     needs: [quality, security]
     if: github.event_name == 'push'
 
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: task-manager-app
+            dockerfile: Dockerfile
+          - name: scheduler-service
+            dockerfile: services/scheduler/Dockerfile
+          - name: notification-service
+            dockerfile: services/notification/Dockerfile
+          - name: file-service
+            dockerfile: services/file-service/Dockerfile
+          - name: search-sync-service
+            dockerfile: services/search-sync/Dockerfile
+          - name: realtime-service
+            dockerfile: services/realtime/Dockerfile
+          - name: analytics-service
+            dockerfile: services/analytics/Dockerfile
+          - name: webhook-service
+            dockerfile: services/webhook/Dockerfile
+          - name: team-service
+            dockerfile: services/team-service/Dockerfile
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -95,7 +118,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ secrets.DOCKER_USERNAME }}/task-manager-app
+          images: ${{ secrets.DOCKER_USERNAME }}/${{ matrix.name }}
           tags: |
             type=sha
             type=raw,value=latest,enable={{is_default_branch}}
@@ -104,7 +127,8 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: ./task-manager
+          file: ./task-manager/${{ matrix.dockerfile }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,scope=${{ matrix.name }},mode=max
