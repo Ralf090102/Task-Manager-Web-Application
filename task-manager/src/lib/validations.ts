@@ -68,3 +68,26 @@ export type RecurringTaskCreateInput = z.infer<typeof recurringTaskCreateSchema>
 export type RecurringTaskUpdateInput = z.infer<typeof recurringTaskUpdateSchema>;
 export type WebhookCreateInput = z.infer<typeof webhookCreateSchema>;
 export type WebhookUpdateInput = z.infer<typeof webhookUpdateSchema>;
+
+export const teamCreateSchema = z.object({
+  name: z.string().min(1, "Team name is required").max(100),
+});
+
+export const memberInviteSchema = z.object({
+  email: z.string().email("Invalid email address"),
+  role: z.enum(["ADMIN", "MEMBER", "VIEWER"]).optional(),
+});
+
+export const memberRoleSchema = z.object({
+  role: z.enum(["ADMIN", "MEMBER", "VIEWER"]),
+});
+
+export const boardCreateSchema = z.object({
+  name: z.string().min(1, "Board name is required").max(100),
+  color: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
+});
+
+export type TeamCreateInput = z.infer<typeof teamCreateSchema>;
+export type MemberInviteInput = z.infer<typeof memberInviteSchema>;
+export type MemberRoleInput = z.infer<typeof memberRoleSchema>;
+export type BoardCreateInput = z.infer<typeof boardCreateSchema>;

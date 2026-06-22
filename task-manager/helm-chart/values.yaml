@@ -186,3 +186,17 @@ monitoring:
     scrapeInterval: 15s
     labels:
       release: monitoring
+
+teamService:
+  enabled: false
+  image:
+    repository: ralf090102/team-service
+    pullPolicy: IfNotPresent
+    tag: latest
+  resources:
+    limits:
+      cpu: 250m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
