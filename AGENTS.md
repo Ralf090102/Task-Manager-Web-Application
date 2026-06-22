@@ -552,6 +552,67 @@ Expanding the monolith into a microservices architecture. 8 planned modules acro
   # Expected: MAX_ATTEMPTS: "5", BACKOFF_INTERVALS: "1,5,30,120,600"
   ```
 
+### Module 8: Team & Workspace Management (Phase 4)
+
+- **Service**: `services/team-service/` — Node.js Fastify microservice for multi-user collaboration
+- **Purpose**: Teams, boards (Kanban), member management with RBAC (Admin/Member/Viewer), activity feed
+- **Runtime**: `tsx` (same pattern as notification/webhook)
+- **Port**: 3002 (ClusterIP only — no Ingress, internal access only)
+- **Authentication**: `X-User-Id` header injected by the main app proxy (main app authenticates via NextAuth, passes userId to team-service)
+- **Endpoints**: `GET/POST /teams`, `GET/DELETE /teams/:id`, `POST /teams/:id/invite`, `PATCH/DELETE /teams/:id/members/:memberId`, `GET/POST /teams/:id/boards`, `GET/DELETE /teams/:id/boards/:boardId`, `GET /teams/:id/activity`
+- **Schema**: `Team` (id, name, slug, ownerId), `Member` (id, teamId, userId, role), `Board` (id, teamId, name, color), `Activity` (id, teamId, userId, type, taskId, metadata). Task model extended with optional `boardId` and `assigneeId`. New enums: `MemberRole` (ADMIN/MEMBER/VIEWER), `ActivityType` (TASK_CREATED/MEMBER_JOINED/BOARD_CREATED/etc.)
+- **RBAC**: `requireMember()` / `requireAdmin()` helper functions enforce access control. Only admins can invite/remove members or delete teams. Viewers get read-only access.
+- **Slug generation**: Auto-generates URL-friendly slug from team name, appends timestamp if slug already exists
+- **Activity feed**: Auto-created on key events (member join/leave, board creation)
+- **Helm templates**: `templates/team-service/` — Deployment, Service (ClusterIP), db-migration-job.yaml (Helm pre-upgrade hook)
+- **DB Migration Hook**: `helm.sh/hook: pre-upgrade,pre-install` with `helm.sh/hook-weight: "-5"` — runs `prisma db push --accept-data-loss` before the deployment rolls out
+- **values.yaml**: `teamService:` section with `enabled`, `image`, `resources`
+- **Main app integration**:
+  - `src/lib/team-proxy.ts` — `teamProxy()` helper (authenticates user, adds `X-User-Id` header, forwards to team-service)
+  - API routes: `src/app/api/teams/route.ts`, `src/app/api/teams/[id]/route.ts`, members, boards, activity sub-routes
+  - Conditional `TEAM_SERVICE_URL` env var in main app deployment
+- **Frontend**:
+  - `/teams` page — list teams, create new team
+  - `/teams/[id]` page — team detail with boards and members tabs, invite members, manage roles
+  - `/teams/[id]/boards/[boardId]` page — Kanban board view (drag-and-drop task columns)
+  - Navbar "Teams" link (visible when logged in)
+- **Image**: `ralf090102/team-service:latest`
+- **Build context**: `task-manager/` (same as other services)
+- **Deploy commands**:
+  ```bash
+  # Build team-service image (from task-manager/, Docker Desktop)
+  docker build -t ralf090102/team-service:latest -f services/team-service/Dockerfile .
+  minikube image load ralf090102/team-service:latest
+
+  # Helm upgrade with team-service enabled
+  # NOTE: --reuse-values does NOT read new values.yaml keys!
+  # Must pass ALL teamService.* values via --set on first deploy:
+  helm upgrade task-manager ./task-manager/helm-chart --namespace task-manager \
+    --reuse-values \
+    --set teamService.enabled=true \
+    --set teamService.image.repository=ralf090102/team-service \
+    --set teamService.image.tag=latest \
+    --set teamService.image.pullPolicy=Never \
+    --set teamService.resources.limits.cpu=250m \
+    --set teamService.resources.limits.memory=256Mi \
+    --set teamService.resources.requests.cpu=100m \
+    --set teamService.resources.requests.memory=128Mi
+
+  # Subsequent upgrades only need --reuse-values:
+  helm upgrade task-manager ./task-manager/helm-chart --namespace task-manager --reuse-values
+
+  # Test health endpoint:
+  kubectl exec deployment/task-manager -n task-manager -- node -e "fetch('http://task-manager-team-service:3002/health').then(r=>r.json()).then(j=>console.log(j))"
+  # Expected: {"status":"ok"}
+
+  # Create a team (via main app proxy — requires X-User-Id which the proxy injects):
+  kubectl exec deployment/task-manager -n task-manager -- node -e "fetch('http://task-manager-team-service:3002/teams',{method:'POST',headers:{'Content-Type':'application/json','X-User-Id':'<your-user-id>'},body:JSON.stringify({name:'Engineering'})}).then(r=>r.json()).then(j=>console.log(j))"
+
+  # Check DB migration Job:
+  kubectl get jobs -n task-manager
+  # Expected: task-manager-db-migration completed
+  ```
+
 ### Service Selector Labels (Critical)
 
 The main app Deployment and Service MUST have `app.kubernetes.io/component: app` in their labels/selectors. Without it, the main app Service selector (`app.kubernetes.io/name=task-manager` + `app.kubernetes.io/instance=task-manager`) matches ALL pods with those base labels — including notification pods. This causes traffic to be load-balanced across both pods (Fastify returns 404 for Next.js routes like `/dashboard`).
@@ -566,6 +627,7 @@ The main app Deployment and Service MUST have `app.kubernetes.io/component: app`
 - Realtime: `app.kubernetes.io/component: realtime`
 - Analytics: `app.kubernetes.io/component: analytics`
 - Webhook: `app.kubernetes.io/component: webhook`
+- Team service: `app.kubernetes.io/component: team-service`
 - Scheduler: N/A (CronJob, no Service)
 
 ### Microservice Pattern (reusable for future services)
@@ -598,7 +660,9 @@ helm-chart/templates/
 ├── search/                   # Meilisearch (statefulset, headless-service, service, secret)
 ├── search-sync/              # Search sync (deployment with initContainer, service)
 ├── realtime/                 # Realtime WebSocket (deployment, service with sessionAffinity)
-└── analytics/                # Analytics (deployment, service, cronjob)
+├── analytics/                # Analytics (deployment, service, cronjob)
+├── webhook/                  # Webhook (deployment, service, configmap)
+└── team-service/             # Team service (deployment, service, db-migration hook)
 ```
 
 Each service has an `enabled` flag in `values.yaml` for conditional rendering.

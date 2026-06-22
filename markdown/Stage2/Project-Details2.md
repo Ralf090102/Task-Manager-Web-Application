@@ -1,6 +1,6 @@
-# Stage 2 - Phase 1, 2 & 3 Learning Summary
+# Stage 2 - Phase 1, 2, 3 & 4 Learning Summary
 
-This document explains the core concepts and technologies implemented in Phases 1-3 of the Task Manager microservices expansion. It covers Module 7 (Recurring Task Scheduler), Module 1 (Notification Service), Module 2 (File Service + MinIO), Module 5 (Search Sync + Meilisearch), Module 4 (Real-time WebSocket Gateway), Module 3 (Analytics & Reporting Service), and Module 6 (Webhook Delivery Service). Each section includes real examples from your codebase.
+This document explains the core concepts and technologies implemented in Phases 1-4 of the Task Manager microservices expansion. It covers Module 7 (Recurring Task Scheduler), Module 1 (Notification Service), Module 2 (File Service + MinIO), Module 5 (Search Sync + Meilisearch), Module 4 (Real-time WebSocket Gateway), Module 3 (Analytics & Reporting Service), Module 6 (Webhook Delivery Service), and Module 8 (Team & Workspace Management). Each section includes real examples from your codebase.
 
 ---
 
@@ -91,6 +91,20 @@ This document explains the core concepts and technologies implemented in Phases 
 75. [Phase 3 Module 6 Key Patterns and Best Practices](#phase-3-module-6-key-patterns-and-best-practices)
 76. [Phase 3 Module 6 Troubleshooting](#phase-3-module-6-troubleshooting)
 
+### Phase 4: Team & Workspace Management (Module 8)
+
+77. [Team & Workspace Management Architecture](#team--workspace-management-architecture)
+78. [Schema Design for Multi-User Collaboration](#schema-design-for-multi-user-collaboration)
+79. [Role-Based Access Control (RBAC)](#role-based-access-control-rbac)
+80. [The X-User-Id Header Authentication Pattern](#the-x-user-id-header-authentication-pattern)
+81. [API Proxy Pattern for Team Service](#api-proxy-pattern-for-team-service)
+82. [Slug Generation and Collision Handling](#slug-generation-and-collision-handling)
+83. [Activity Feed Design](#activity-feed-design)
+84. [Helm Hooks for Database Migrations](#helm-hooks-for-database-migrations)
+85. [Frontend Kanban Board with Drag-and-Drop](#frontend-kanban-board-with-drag-and-drop)
+86. [Phase 4 Key Patterns and Best Practices](#phase-4-key-patterns-and-best-practices)
+87. [Phase 4 Troubleshooting](#phase-4-troubleshooting)
+
 ---
 
 ## Microservices Architecture in a Monorepo
@@ -112,7 +126,7 @@ task-manager/
 │   ├── search-sync/               # Module 5 (implemented)
 │   ├── webhook/                   # Module 6 (implemented)
 │   ├── scheduler/                 # Module 7 (implemented)
-│   └── team-service/              # Module 8 (future)
+│   └── team-service/              # Module 8 (implemented)
 ├── helm-chart/
 └── Dockerfile                     # Main app
 ```
@@ -6048,6 +6062,926 @@ if (!crypto.timingSafeEqual(
 **Cause**: This is expected behavior — `terminationGracePeriodSeconds: 35` gives the worker time to finish in-flight deliveries. The pod won't terminate until the graceful shutdown handler completes or the grace period expires.
 
 **Fix**: This is by design. If faster termination is needed, reduce `terminationGracePeriodSeconds` (but ensure it's still > worst-case shutdown time).
+
+---
+
+## Team & Workspace Management Architecture
+
+### From Personal Tasks to Team Collaboration
+
+Modules 1-7 added infrastructure services (notifications, search, webhooks, analytics). Module 8 transforms the app itself — from a single-user task manager into a multi-user collaboration platform with teams, shared boards, and role-based access control.
+
+### What Changed
+
+| Before (Phases 1-3) | After (Phase 4) |
+|---------------------|-----------------|
+| Tasks belong to one user | Tasks can belong to a team board |
+| No concept of teams | Teams with members and roles |
+| No shared views | Kanban boards visible to all team members |
+| No activity tracking | Activity feed for team audit trail |
+| Single-user focused | Multi-user collaboration (RBAC) |
+
+### Architecture
+
+```
+Browser ──► NGINX ──► Main App (Next.js)
+                          │
+                          ├── /api/teams/*     ► team-proxy() ──► Team Service (port 3002)
+                          │                        │
+                          │                        ├──► PostgreSQL (Team, Member, Board, Activity)
+                          │                        │
+                          │                        └── RBAC enforcement (Admin/Member/Viewer)
+                          │
+                          └── /api/tasks/*     ► Task CRUD (existing, now with boardId)
+```
+
+The team service is internal-only (ClusterIP, no Ingress). The main app authenticates users via NextAuth, then proxies requests to the team service with an `X-User-Id` header.
+
+### Why a Separate Service?
+
+Team management involves complex business logic (RBAC, invitations, activity tracking). Keeping this in the main app would bloat the Next.js API routes with domain logic that doesn't belong in a frontend framework. The separate service:
+
+1. **Encapsulates RBAC logic** — role checks happen in one place
+2. **Scales independently** — team operations are read-heavy (activity feeds, member lists)
+3. **Maintains clear boundaries** — the main app handles task CRUD + UI; the team service handles collaboration
+
+### Database-as-Shared-Contract
+
+The team service shares the same PostgreSQL database as the main app. Both read/write to the `Team`, `Member`, `Board`, and `Activity` tables. This is simpler than syncing data between separate databases, and the Prisma schema serves as the shared contract.
+
+```
+PostgreSQL
+├── User (shared — main app creates, team service reads)
+├── Task (shared — main app owns, team service reads boardId)
+├── Team (team service owns, main app reads for display)
+├── Member (team service owns)
+├── Board (team service owns, main app reads for display)
+└── Activity (team service owns)
+```
+
+---
+
+## Schema Design for Multi-User Collaboration
+
+### Four New Models + Two Enums
+
+```prisma
+enum MemberRole {
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+enum ActivityType {
+  TASK_CREATED
+  TASK_UPDATED
+  TASK_COMPLETED
+  TASK_DELETED
+  TASK_ASSIGNED
+  MEMBER_JOINED
+  MEMBER_LEFT
+  BOARD_CREATED
+}
+
+model Team {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  ownerId   String
+  owner     User     @relation("TeamOwner", fields: [ownerId], references: [id])
+  members   Member[]
+  boards    Board[]
+  activities Activity[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([ownerId])
+}
+
+model Member {
+  id       String     @id @default(cuid())
+  teamId   String
+  team     Team       @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  userId   String
+  user     User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role     MemberRole @default(MEMBER)
+  joinedAt DateTime   @default(now())
+
+  @@unique([teamId, userId])
+  @@index([userId])
+}
+
+model Board {
+  id        String   @id @default(cuid())
+  teamId    String
+  team      Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  name      String
+  color     String   @default("#3b82f6")
+  tasks     Task[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([teamId])
+}
+
+model Activity {
+  id        String       @id @default(cuid())
+  teamId    String
+  team      Team         @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      ActivityType
+  taskId    String?
+  metadata  Json?
+
+  createdAt DateTime     @default(now())
+
+  @@index([teamId, createdAt])
+}
+```
+
+### Key Design Decisions
+
+**`@@unique([teamId, userId])` on Member** — A user can only be a member of a team once. This composite unique constraint prevents duplicate memberships at the database level. Prisma generates a `teamId_userId` compound unique key, enabling `findUnique` with `{ teamId_userId: { teamId, userId } }`.
+
+**`slug @unique` on Team** — URL-friendly identifier for team pages (`/teams/engineering`). The unique constraint ensures no two teams have the same slug.
+
+**`color String @default("#3b82f6")` on Board** — Each board gets a color for visual distinction in the UI. The default is a pleasant blue.
+
+**`metadata Json?` on Activity** — Flexible JSON field for event-specific data (e.g., board name when a board is created). Nullable because not all activities have metadata.
+
+**`onDelete: Cascade` on Member/Board/Activity → Team** — Deleting a team cascades to all its members, boards, and activities. No orphaned records.
+
+### Task Model Extensions
+
+```prisma
+model Task {
+  // ... existing fields ...
+  boardId     String?
+  board       Board?       @relation(fields: [boardId], references: [id], onDelete: SetNull)
+  assigneeId  String?
+  assignee    User?        @relation("TaskAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+
+  @@index([boardId])
+  @@index([assigneeId])
+}
+```
+
+**`boardId String?`** — Nullable: `null` = personal task, set = team board task. When a board is deleted, tasks are NOT deleted — `boardId` is set to `null` (`onDelete: SetNull`). The task becomes a personal task again.
+
+**`assigneeId String?`** — Nullable: who is responsible for this task. When the assignee's user account is deleted, `assigneeId` is set to `null` (task becomes unassigned, not deleted).
+
+**Named relations** — `"TaskAssignee"` and `"TeamOwner"` disambiguate when a model has multiple relations to the same model. Without named relations, Prisma can't determine which `User` relation field corresponds to which foreign key.
+
+### Composite Index: `@@index([teamId, createdAt])` on Activity
+
+The activity feed query is always "latest 50 activities for team X":
+
+```sql
+SELECT * FROM "Activity" WHERE "teamId" = ? ORDER BY "createdAt" DESC LIMIT 50;
+```
+
+The composite index on `[teamId, createdAt]` makes this query near-instant — PostgreSQL can both filter by teamId and sort by createdAt using the same index.
+
+---
+
+## Role-Based Access Control (RBAC)
+
+### Three Roles
+
+| Role | Can View | Can Edit Tasks | Can Manage Members | Can Delete Team |
+|------|----------|---------------|-------------------|----------------|
+| **ADMIN** | ✅ | ✅ | ✅ (invite, remove, change roles) | ✅ |
+| **MEMBER** | ✅ | ✅ | ❌ | ❌ |
+| **VIEWER** | ✅ | ❌ | ❌ | ❌ |
+
+### Enforcement in the Service Layer
+
+RBAC is enforced by helper functions that throw if the user lacks permission:
+
+```typescript
+// services/team-service/src/index.ts
+
+async function requireMember(teamId: string, userId: string): Promise<TeamMember> {
+  const membership = await getMembership(teamId, userId);
+  if (!membership) {
+    throw { statusCode: 403, message: "Not a team member" };
+  }
+  return membership;
+}
+
+async function requireAdmin(teamId: string, userId: string): Promise<TeamMember> {
+  const membership = await requireMember(teamId, userId);
+  if (membership.role !== "ADMIN") {
+    throw { statusCode: 403, message: "Admin access required" };
+  }
+  return membership;
+}
+```
+
+Every endpoint that needs access control calls one of these:
+
+```typescript
+// Only admins can invite members
+app.post("/teams/:id/invite", async (req) => {
+  const userId = (req as never as { userId: string }).userId;
+  const { id } = req.params as { id: string };
+  await requireAdmin(id, userId);  // Throws 403 if not admin
+  // ... invite logic
+});
+
+// Any member can create boards
+app.post("/teams/:id/boards", async (req) => {
+  const userId = (req as never as { userId: string }).userId;
+  const { id } = req.params as { id: string };
+  await requireMember(id, userId);  // Throws 403 if not a member
+  // ... board creation logic
+});
+```
+
+### Why RBAC in the Service, Not the Frontend?
+
+Frontend RBAC (hiding buttons, disabling forms) improves UX but is **not security**. A user can always craft an HTTP request manually. By enforcing RBAC in the service layer:
+
+1. **Security is centralized** — one place to audit and change rules
+2. **Frontend is optional** — any client (CLI, another service) gets the same protection
+3. **Errors are consistent** — always returns 403 with a clear message
+
+### The "Last Admin" Guard
+
+```typescript
+if (targetMember.role === "ADMIN") {
+  const adminCount = await prisma.member.count({
+    where: { teamId: id, role: "ADMIN" },
+  });
+  if (adminCount <= 1) {
+    throw { statusCode: 400, message: "Cannot remove the last admin" };
+  }
+}
+```
+
+Without this check, an admin could remove their own admin role (or leave the team), leaving the team with no admin — unable to invite members or delete the team. The guard ensures at least one admin always exists.
+
+---
+
+## The X-User-Id Header Authentication Pattern
+
+### The Problem: How Does the Team Service Know Who You Are?
+
+The team service doesn't have access to NextAuth sessions — it's a separate process in a separate pod. It needs to know which user is making each request.
+
+### Two Options
+
+| Approach | How | Pros | Cons |
+|----------|-----|------|------|
+| **JWT verification** | Team service decrypts NextAuth JWT | Cryptographic proof of identity | Complex (NextAuth v5 uses encrypted JWE, requires shared secret) |
+| **Trusted header** | Main app passes `X-User-Id` header | Simple, no crypto, fast | Requires network-level trust (service is internal-only) |
+
+### Why Trusted Header?
+
+The team service is **ClusterIP-only** — no Ingress, no external access. Only the main app pod can reach it. Since the main app has already authenticated the user via NextAuth, it can safely pass the userId:
+
+```
+Browser ──► NGINX ──► Main App (NextAuth verifies session)
+                         │
+                         │  fetch("http://team-service:3002/teams", {
+                         │    headers: { "X-User-Id": session.user.id }
+                         │  })
+                         │
+                         ▼
+                    Team Service (trusts X-User-Id header)
+```
+
+This is the **trusted subsystem pattern** — internal services trust the authentication performed by the edge service (main app). It's used by AWS internal services, microservice meshes, and service-to-service auth in Kubernetes.
+
+### Implementation
+
+The team service extracts the userId from every request:
+
+```typescript
+app.addHook("onRequest", async (req, reply) => {
+  if (req.url === "/health") return;  // Health checks don't need auth
+
+  const userId = req.headers["x-user-id"] as string | undefined;
+  if (!userId) {
+    return reply.status(401).send({ error: "X-User-Id header required" });
+  }
+  (req as never as { userId: string }).userId = userId;
+});
+```
+
+This Fastify `onRequest` hook runs before every route handler. If the `X-User-Id` header is missing, the request is rejected with 401.
+
+### Why Not JWT Like the Realtime Service?
+
+The realtime service decrypts NextAuth JWTs because it handles **WebSocket connections directly from browsers** — there's no intermediate proxy. The team service is always proxied through the main app, so it doesn't need cryptographic verification.
+
+| Realtime Service | Team Service |
+|-----------------|-------------|
+| Direct browser WebSocket connections | Always proxied through main app |
+| Needs cryptographic proof (JWT) | Trusts main app's authentication |
+| `jose.jwtDecrypt` | `X-User-Id` header |
+
+---
+
+## API Proxy Pattern for Team Service
+
+### The teamProxy Helper
+
+The main app proxies all team operations through a single helper:
+
+```typescript
+// src/lib/team-proxy.ts
+export async function teamProxy(
+  path: string,
+  options: { method?: string; body?: unknown } = {}
+): Promise<Response> {
+  const session = await auth();
+  if (!session?.user?.id) {
+    return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  if (!TEAM_SERVICE_URL) {
+    return Response.json(
+      { error: "Team service not configured" },
+      { status: 503 }
+    );
+  }
+
+  try {
+    const response = await fetch(`${TEAM_SERVICE_URL}${path}`, {
+      method: options.method || "GET",
+      headers: {
+        "Content-Type": "application/json",
+        "X-User-Id": session.user.id,
+      },
+      body: options.body ? JSON.stringify(options.body) : undefined,
+    });
+
+    const data = response.status === 204 ? null : await response.json();
+    return Response.json(data, { status: response.status });
+  } catch {
+    return Response.json(
+      { error: "Failed to reach team service" },
+      { status: 502 }
+    );
+  }
+}
+```
+
+### How It Works
+
+1. **Authenticate** — `auth()` checks the NextAuth session. Rejects unauthenticated users (401).
+2. **Check service availability** — If `TEAM_SERVICE_URL` is not set, returns 503 (graceful degradation).
+3. **Forward** — Makes an HTTP request to the team service with `X-User-Id` header.
+4. **Handle errors** — If the fetch fails (service down, network error), returns 502 (bad gateway).
+
+### Route Files Are Thin Wrappers
+
+Each API route file is just a few lines — it validates input with Zod, then delegates to `teamProxy`:
+
+```typescript
+// src/app/api/teams/route.ts
+export async function GET() {
+  return teamProxy("/teams");
+}
+
+export async function POST(req: Request) {
+  const body = await req.json();
+  const parsed = teamCreateSchema.safeParse(body);
+
+  if (!parsed.success) {
+    return Response.json(
+      { error: "Validation failed", details: parsed.error.issues },
+      { status: 400 }
+    );
+  }
+
+  return teamProxy("/teams", { method: "POST", body: parsed.data });
+}
+```
+
+### Why Proxy Instead of Direct Browser → Team Service?
+
+Users never call the team service directly because:
+
+1. **Security** — The team service has no Ingress. Only the main app can reach it.
+2. **Authentication** — The browser has a NextAuth session cookie. The team service needs `X-User-Id`. The proxy translates between them.
+3. **Validation** — Zod validation happens in the main app before the request reaches the team service.
+
+### Comparison with Analytics Proxy
+
+The analytics proxy (`/api/stats`) follows the same pattern but passes `session.user.id` in the URL path instead of a header:
+
+```typescript
+// Analytics: userId in URL
+fetch(`${ANALYTICS_URL}/stats/summary/${session.user.id}`);
+
+// Team: userId in header
+fetch(`${TEAM_SERVICE_URL}/teams`, {
+  headers: { "X-User-Id": session.user.id }
+});
+```
+
+The header approach is cleaner for services with many endpoints — the userId doesn't clutter every URL path.
+
+---
+
+## Slug Generation and Collision Handling
+
+### What Is a Slug?
+
+A **slug** is a URL-friendly version of a name: lowercase, no spaces, no special characters.
+
+```
+"Engineering Team" → "engineering-team"
+"My Project!"      → "my-project"
+```
+
+### Slug Generation Algorithm
+
+```typescript
+function generateSlug(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")  // Non-alphanumeric → hyphen
+    .replace(/^-+|-+$/g, "")      // Trim leading/trailing hyphens
+    .slice(0, 50);                 // Max 50 chars
+}
+```
+
+Step by step with `"My Cool Team!"`:
+
+| Step | Result |
+|------|--------|
+| `.toLowerCase()` | `"my cool team!"` |
+| `.replace(/[^a-z0-9]+/g, "-")` | `"my-cool-team-"` |
+| `.replace(/^-+\|-+$/g, "")` | `"my-cool-team"` |
+| `.slice(0, 50)` | `"my-cool-team"` |
+
+### Collision Handling
+
+Two teams named "Engineering" would generate the same slug `"engineering"`. Since `slug` has a `@unique` constraint, the second insert would fail. The solution:
+
+```typescript
+let slug = generateSlug(name);
+const existing = await prisma.team.findUnique({ where: { slug } });
+if (existing) {
+  slug = `${slug}-${Date.now().toString(36)}`;
+  // e.g., "engineering-lq3x9p2k"
+}
+```
+
+`Date.now().toString(36)` converts the current timestamp to base-36 (alphanumeric). This creates a short, unique suffix:
+
+```
+engineering-lq3x9p2k
+engineering-lq3x9p2m  (1ms later)
+```
+
+### Why Not Just Use the CUID?
+
+The `id` field is already a unique CUID (`cm5x...`). But slugs are human-readable and appear in URLs:
+
+```
+/teams/cm5x8q3z0000a1b2c3d4e5f6  ← CUID (unreadable)
+/teams/engineering-team           ← Slug (readable)
+```
+
+Slugs improve UX (bookmarkable, shareable) without sacrificing uniqueness.
+
+---
+
+## Activity Feed Design
+
+### What Is an Activity Feed?
+
+An **activity feed** is an audit trail of events within a team: who joined, who created a board, what tasks were created. It's like a Slack channel log but for team management events.
+
+### Activity Types (Enum)
+
+```prisma
+enum ActivityType {
+  TASK_CREATED      // Someone created a task on a board
+  TASK_UPDATED      // A task was edited
+  TASK_COMPLETED    // A task was marked complete
+  TASK_DELETED      // A task was removed
+  TASK_ASSIGNED     // A task was assigned to someone
+  MEMBER_JOINED     // A new member was added
+  MEMBER_LEFT       // A member was removed or left
+  BOARD_CREATED     // A new board was created
+}
+```
+
+Using an **enum** (not a plain String) ensures only known activity types are stored. Adding a new type requires a schema change — intentional friction to prevent ad-hoc activity types.
+
+### Creating Activities
+
+Activities are created automatically as side effects of other operations:
+
+```typescript
+// When a member is invited:
+await prisma.member.create({
+  data: { teamId: id, userId: invitee.id, role: memberRole },
+});
+await createActivity(id, invitee.id, "MEMBER_JOINED");
+
+// When a board is created:
+const board = await prisma.board.create({ data: { teamId: id, name, color } });
+await createActivity(id, userId, "BOARD_CREATED", undefined, { boardName: name });
+```
+
+The `createActivity` helper:
+
+```typescript
+async function createActivity(
+  teamId: string,
+  userId: string,
+  type: string,
+  taskId?: string,
+  metadata?: unknown
+): Promise<void> {
+  await prisma.activity.create({
+    data: {
+      teamId,
+      userId,
+      type: type as never,
+      taskId: taskId ?? null,
+      metadata: (metadata as never) ?? undefined,
+    },
+  });
+}
+```
+
+### Querying the Feed
+
+```typescript
+app.get("/teams/:id/activity", async (req) => {
+  const { id } = req.params as { id: string };
+  await requireMember(id, userId);  // Only members see the feed
+
+  return prisma.activity.findMany({
+    where: { teamId: id },
+    include: {
+      user: { select: { id: true, name: true, image: true } },
+    },
+    orderBy: { createdAt: "desc" },
+    take: 50,  // Latest 50
+  });
+});
+```
+
+The `take: 50` limit prevents loading the entire history. For infinite scroll, you'd add cursor-based pagination (`skip: offset, take: 50`).
+
+### Why `metadata Json?`?
+
+Different activity types need different extra data:
+- `BOARD_CREATED` → board name
+- `TASK_ASSIGNED` → assignee name
+- `MEMBER_JOINED` → role
+
+Instead of adding nullable columns for each type, `metadata Json?` stores type-specific data flexibly:
+
+```json
+{
+  "type": "BOARD_CREATED",
+  "metadata": { "boardName": "Sprint Planning" }
+}
+```
+
+---
+
+## Helm Hooks for Database Migrations
+
+### The Problem: Schema Changes During Deployment
+
+Module 8 adds four new tables (`Team`, `Member`, `Board`, `Activity`) and modifies the `Task` model. The new code expects these tables to exist. If the deployment rolls out before the schema is updated, the team service crashes on startup.
+
+Traditional approach: run `prisma db push` manually before deploying. But this is error-prone and doesn't scale in CI/CD.
+
+### Helm Hooks: Automated Pre-Deployment Migrations
+
+A **Helm hook** is a Kubernetes Job that runs at a specific point in the Helm release lifecycle. The team service uses a `pre-upgrade,pre-install` hook to run `prisma db push` **before** any new pods are created.
+
+```yaml
+# templates/team-service/db-migration-job.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "task-manager.fullname" . }}-db-migration
+  annotations:
+    "helm.sh/hook": pre-upgrade,pre-install
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: migrate
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          command: ["npx", "prisma", "db", "push", "--accept-data-loss"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "task-manager.fullname" . }}-secrets
+                  key: database-url
+```
+
+### Hook Annotations Explained
+
+| Annotation | Value | Meaning |
+|------------|-------|---------|
+| `helm.sh/hook` | `pre-upgrade,pre-install` | Run before install AND before upgrade |
+| `helm.sh/hook-weight` | `-5` | Run before other hooks (lower = earlier) |
+| `helm.sh/hook-delete-policy` | `before-hook-creation` | Delete previous Job before creating a new one |
+
+### Hook Lifecycle
+
+```
+helm upgrade task-manager ...
+     │
+     ├── 1. Run pre-upgrade hooks (db-migration Job)
+     │      └── prisma db push --accept-data-loss
+     │          (schema tables created/updated)
+     │
+     ├── 2. Update Deployments, Services, etc.
+     │      └── New pods start with updated schema ready
+     │
+     └── 3. Release complete
+```
+
+### Why `--accept-data-loss`?
+
+`prisma db push` without this flag prompts interactively when schema changes could lose data (e.g., dropping a column). In a Job, there's no TTY for interaction. The flag auto-accepts, allowing the Job to complete non-interactively.
+
+For this project, schema changes are additive (new tables, new nullable columns) — no data loss. In production with destructive migrations, you'd use `prisma migrate` with versioned migration files instead.
+
+### Why the Main App Image?
+
+The migration Job uses `{{ .Values.image.repository }}` — the **main app image**, not the team service image. This is because the main app image contains the Prisma CLI and schema:
+
+```dockerfile
+# Main app Dockerfile already runs prisma generate during build
+RUN npx prisma generate
+```
+
+The team service image has `tsx` but not the Prisma CLI in its runner stage. Using the main app image is simpler than building a separate migration image.
+
+---
+
+## Frontend Kanban Board with Drag-and-Drop
+
+### The Board View
+
+The Kanban board displays tasks in three columns (TODO, IN_PROGRESS, COMPLETED). Users drag task cards between columns to change status.
+
+### HTML5 Drag-and-Drop API
+
+The board uses the native HTML5 drag-and-drop API — no external library:
+
+```typescript
+// src/components/BoardView.tsx
+
+// Card is draggable
+<div
+  draggable={canEdit}
+  onDragStart={() => setDraggedId(task.id)}
+  onDragEnd={() => setDraggedId(null)}
+>
+  {task.title}
+</div>
+
+// Column is a drop target
+<div
+  onDragOver={(e) => e.preventDefault()}  // Allow drop
+  onDrop={() => {
+    if (draggedId && canEdit) {
+      moveTask(draggedId, col.key);
+      setDraggedId(null);
+    }
+  }}
+>
+  {/* Tasks */}
+</div>
+```
+
+### Optimistic Update
+
+When a task is moved, the UI updates immediately (optimistic), then syncs with the server:
+
+```typescript
+const moveTask = useCallback(async (taskId: string, newStatus: string) => {
+  const task = board.tasks.find((t) => t.id === taskId);
+  if (!task || task.status === newStatus) return;
+
+  // Optimistic update — UI changes immediately
+  setBoard((prev) => ({
+    ...prev,
+    tasks: prev.tasks.map((t) =>
+      t.id === taskId ? { ...t, status: newStatus } : t
+    ),
+  }));
+
+  try {
+    await fetch(`/api/tasks/${taskId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: newStatus }),
+    });
+  } catch {
+    // Rollback on failure
+    setBoard((prev) => ({
+      ...prev,
+      tasks: prev.tasks.map((t) =>
+        t.id === taskId ? { ...t, status: task.status } : t
+      ),
+    }));
+  }
+}, [board.tasks]);
+```
+
+### Why Optimistic Updates?
+
+- **Instant feedback** — The card snaps to the new column immediately, no loading spinner
+- **Network tolerance** — If the request takes 200ms, the user doesn't notice
+- **Rollback on error** — If the request fails, the card animates back to its original column
+
+### Role-Based UI
+
+```typescript
+// Viewers can't drag (read-only)
+draggable={canEdit}  // canEdit = role !== "VIEWER"
+
+// Footer shows access level
+{!canEdit && (
+  <p className="mt-4 text-center text-xs text-zinc-400">
+    Read-only access (Viewer role)
+  </p>
+)}
+```
+
+The drag-and-drop is disabled for viewers — `draggable={false}` prevents dragging entirely.
+
+### Team Detail Page
+
+The team detail page uses tabs to switch between boards and members:
+
+```typescript
+// src/components/TeamDetail.tsx
+const [tab, setTab] = useState<"boards" | "members">("boards");
+
+// Tab buttons with active state styling
+<button onClick={() => setTab("boards")}>Boards ({team.boards.length})</button>
+<button onClick={() => setTab("members")}>Members ({team.members.length})</button>
+```
+
+The members tab shows:
+- Invite form (admins only)
+- Member list with role management (admins can change roles)
+- Remove button (admins can remove anyone; users can remove themselves)
+
+---
+
+## Phase 4 Key Patterns and Best Practices
+
+### Key Patterns:
+- **Multi-user collaboration** (teams, shared boards, member management)
+- **Application-layer RBAC** (Admin/Member/Viewer roles enforced in service)
+- **Trusted header authentication** (`X-User-Id` for internal service-to-service)
+- **API proxy with auth injection** (main app authenticates, forwards to team service)
+- **Helm pre-upgrade hooks** (run DB migrations before new pods start)
+- **Composite unique constraints** (`@@unique([teamId, userId])` prevents duplicate memberships)
+- **Named Prisma relations** (`"TaskAssignee"`, `"TeamOwner"` for multiple relations to same model)
+- **`onDelete: SetNull` for optional relations** (task survives board deletion)
+- **Slug generation with collision handling** (timestamp suffix for duplicates)
+- **Activity feed with enum types + JSON metadata** (structured audit trail)
+- **HTML5 drag-and-drop** (native API, no external library)
+- **Optimistic UI updates with rollback** (instant feedback, graceful failure)
+- **Conditional `TEAM_SERVICE_URL` env injection** (graceful degradation)
+
+### Best Practices:
+- Enforce RBAC in the service layer, not just the frontend
+- Use trusted headers only for internal (ClusterIP) services — never for external-facing APIs
+- Guard against "last admin" removal (prevent teams with no admin)
+- Use enums for activity types (prevent ad-hoc types)
+- Set `helm.sh/hook-delete-policy: before-hook-creation` (avoid Job name conflicts)
+- Use main app image for migration Jobs (already has Prisma CLI)
+- Make board tasks `onDelete: SetNull` (don't lose tasks when board is deleted)
+- Index activity feed on `[teamId, createdAt]` (efficient pagination)
+- Use optimistic updates for drag-and-drop (instant feedback)
+- Check `canEdit` before enabling drag (respect RBAC in UI)
+- Validate with Zod before proxying to service (fail fast on bad input)
+- Pass userId via header, not URL path (cleaner for multi-endpoint services)
+
+---
+
+## Phase 4 Troubleshooting
+
+### DB Migration Job Fails
+
+**Symptom**: `helm upgrade` fails, migration Job shows error in logs.
+
+**Diagnosis**:
+```bash
+# Check migration Job
+kubectl get jobs -n task-manager
+
+# Check Job logs
+kubectl logs job/task-manager-db-migration -n task-manager
+```
+
+**Common causes**:
+- `DATABASE_URL` not set in the Secret (check `kubectl get secret`)
+- Database unreachable from cluster (network issue)
+- `prisma db push` hangs on PgBouncer URL (use direct connection URL for migrations)
+- Schema validation error (check Prisma schema syntax)
+
+### Team Service Returns 401
+
+**Symptom**: All team API calls return `{"error": "X-User-Id header required"}`.
+
+**Cause**: The `teamProxy` helper is not adding the `X-User-Id` header, or the user is not authenticated.
+
+**Diagnosis**:
+```bash
+# Check if TEAM_SERVICE_URL is set
+kubectl exec deployment/task-manager -n task-manager -- printenv TEAM_SERVICE_URL
+
+# Test directly with header
+kubectl exec deployment/task-manager -n task-manager -- node -e "fetch('http://task-manager-team-service:3002/teams',{headers:{'X-User-Id':'test'}}).then(r=>r.json()).then(j=>console.log(j))"
+```
+
+### Team Service Returns 403
+
+**Symptom**: API returns `{"error": "Not a team member"}` or `{"error": "Admin access required"}`.
+
+**Cause**: The user is not a member of the team, or doesn't have the required role.
+
+**Fix**: This is correct behavior — RBAC is working. If the user should be a member, check:
+```bash
+# Query membership directly
+kubectl exec deployment/task-manager-team-service -n task-manager -- node -e "
+fetch('http://localhost:3002/teams/<team-id>', {headers:{'X-User-Id':'<user-id>'}})
+.then(r=>r.json()).then(j=>console.log(j))
+"
+```
+
+### Slug Collision Causes Duplicate Team Names
+
+**Symptom**: Two teams named "Engineering" have slugs "engineering" and "engineering-lq3x9p2k".
+
+**Cause**: This is by design — the timestamp suffix prevents unique constraint violations.
+
+**Fix**: This is correct behavior. The slug is unique, the display name is not. If you want unique display names, add a `@@unique([name])` constraint (but this prevents teams with the same name across different owners).
+
+### Helm Hook Job Not Running
+
+**Symptom**: `helm upgrade` succeeds but the migration Job doesn't appear.
+
+**Diagnosis**:
+```bash
+# Check if the hook annotation is present
+helm get manifest task-manager -n task-manager | grep -A5 "helm.sh/hook"
+
+# Check teamService.enabled
+helm get values task-manager -n task-manager | grep teamService
+```
+
+**Common causes**:
+- `teamService.enabled` is false (hook is inside `{{- if .Values.teamService.enabled }}`)
+- Hook annotation syntax error (check YAML indentation)
+- Previous hook Job still running (check `kubectl get jobs`)
+
+### Board Tasks Disappear After Board Deletion
+
+**Symptom**: Tasks that were on a deleted board are gone.
+
+**Cause**: This should NOT happen — `onDelete: SetNull` means tasks get `boardId = null` (become personal tasks). If tasks are deleted, the `onDelete` strategy is wrong.
+
+**Verification**: Check the schema:
+```prisma
+board  Board?  @relation(fields: [boardId], references: [id], onDelete: SetNull)
+```
+
+If it says `onDelete: Cascade`, tasks are being deleted with the board. Change to `SetNull`.
+
+### Drag-and-Drop Not Working
+
+**Symptom**: Task cards can't be dragged between columns.
+
+**Diagnosis**:
+1. Check if user has edit permission (Viewers can't drag — `draggable={false}`)
+2. Check browser console for JavaScript errors
+3. Verify the `onDrop` handler is firing (add `console.log`)
+
+**Common causes**:
+- User is a Viewer (read-only) — check `canEdit` prop
+- `onDragOver` missing `e.preventDefault()` (drop not allowed)
+- Stale state in `draggedId` (not reset on drag end)
 
 ---
 

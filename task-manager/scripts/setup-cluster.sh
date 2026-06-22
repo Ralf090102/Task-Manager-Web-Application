@@ -96,6 +96,7 @@ SEARCH_SYNC_IMAGE="ralf090102/search-sync-service"
 REALTIME_IMAGE="ralf090102/realtime-service"
 ANALYTICS_IMAGE="ralf090102/analytics-service"
 WEBHOOK_IMAGE="ralf090102/webhook-service"
+TEAM_SERVICE_IMAGE="ralf090102/team-service"
 MINIO_IMAGE="minio/minio"
 MEILISEARCH_IMAGE="getmeili/meilisearch"
 MEILISEARCH_TAG="v1.6"
@@ -385,6 +386,7 @@ else
         "realtime|${REALTIME_IMAGE}:${MICROSERVICE_TAG}|${BUILD_CONTEXT}/services/realtime/Dockerfile"
         "analytics|${ANALYTICS_IMAGE}:${MICROSERVICE_TAG}|${BUILD_CONTEXT}/services/analytics/Dockerfile"
         "webhook|${WEBHOOK_IMAGE}:${MICROSERVICE_TAG}|${BUILD_CONTEXT}/services/webhook/Dockerfile"
+        "team-service|${TEAM_SERVICE_IMAGE}:${MICROSERVICE_TAG}|${BUILD_CONTEXT}/services/team-service/Dockerfile"
     )
 
     # Create a temp dir for parallel build logs (so output stays clean)
@@ -617,7 +619,15 @@ helm upgrade --install "$APP_RELEASE" \
     --set webhook.resources.limits.cpu=250m \
     --set webhook.resources.limits.memory=256Mi \
     --set webhook.resources.requests.cpu=100m \
-    --set webhook.resources.requests.memory=128Mi >/dev/null 2>&1
+    --set webhook.resources.requests.memory=128Mi \
+    --set teamService.enabled=true \
+    --set teamService.image.repository="${TEAM_SERVICE_IMAGE}" \
+    --set teamService.image.tag="${MICROSERVICE_TAG}" \
+    --set teamService.image.pullPolicy=Never \
+    --set teamService.resources.limits.cpu=250m \
+    --set teamService.resources.limits.memory=256Mi \
+    --set teamService.resources.requests.cpu=100m \
+    --set teamService.resources.requests.memory=128Mi >/dev/null 2>&1
 
 if [[ $? -ne 0 ]]; then
     write_err "Helm deploy failed"
@@ -836,8 +846,31 @@ else
     write_err "Webhook service health check failed"
 fi
 
-# ============================================================================
-# Step 7: Install kube-prometheus-stack (Monitoring)
+# Wait for team-service pod to be ready.
+write_info "Waiting for team-service pod to be ready..."
+kubectl wait --namespace "$APP_NAMESPACE" \
+    --for=condition=ready pod \
+    --selector="app.kubernetes.io/component=team-service" \
+    --timeout=120s >/dev/null 2>&1
+
+if [[ $? -ne 0 ]]; then
+    write_err "team-service pod did not become ready"
+    write_info "Check: kubectl logs -n $APP_NAMESPACE -l app.kubernetes.io/component=team-service"
+    exit 1
+fi
+write_ok "team-service pod is running"
+
+# Verify the team-service health endpoint.
+write_info "Testing team-service health endpoint..."
+TEAM_HEALTH=$(kubectl exec -n "$APP_NAMESPACE" deployment/"$APP_RELEASE" \
+    -- node -e "fetch('http://${APP_RELEASE}-team-service:3002/health').then(r=>r.text()).then(t=>console.log(t))" 2>/dev/null || echo "")
+
+if echo "$TEAM_HEALTH" | grep -q "ok"; then
+    write_ok "Team service is healthy"
+else
+    write_err "Team service health check failed"
+fi
+
 # ============================================================================
 
 # Skipped entirely when --skip-monitoring is passed.
@@ -1151,6 +1184,7 @@ if [[ "$SKIP_MONITORING" == true ]]; then
     - Realtime (internal)     : ClusterIP:3001, WebSocket gateway
     - Analytics (internal)    : ClusterIP:8000, Python analytics + weekly reports
     - Webhook (internal)      : ClusterIP:3003, webhook delivery with retry
+    - Team service (internal) : ClusterIP:3002, team & workspace management
 
   Next steps:
 
@@ -1178,6 +1212,7 @@ else
     - Realtime (internal)     : ClusterIP:3001, WebSocket gateway
     - Analytics (internal)    : ClusterIP:8000, Python analytics + weekly reports
     - Webhook (internal)      : ClusterIP:3003, webhook delivery with retry
+    - Team service (internal) : ClusterIP:3002, team & workspace management
 
   Next steps:
 
@@ -1197,7 +1232,7 @@ else
      kubectl port-forward -n monitoring svc/monitoring-kube-prometheus-prometheus 9090:9090
      Open: http://localhost:9090
 
-   Ready for Phase 3: WebSocket (real-time) -> Python Analytics
+   Ready for Phase 4: All 8 modules deployed!
 EOF
 fi
 
