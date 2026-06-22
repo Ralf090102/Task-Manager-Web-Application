@@ -95,6 +95,7 @@ FILE_SERVICE_IMAGE="ralf090102/file-service"
 SEARCH_SYNC_IMAGE="ralf090102/search-sync-service"
 REALTIME_IMAGE="ralf090102/realtime-service"
 ANALYTICS_IMAGE="ralf090102/analytics-service"
+WEBHOOK_IMAGE="ralf090102/webhook-service"
 MINIO_IMAGE="minio/minio"
 MEILISEARCH_IMAGE="getmeili/meilisearch"
 MEILISEARCH_TAG="v1.6"
@@ -383,6 +384,7 @@ else
         "search-sync|${SEARCH_SYNC_IMAGE}:${MICROSERVICE_TAG}|${BUILD_CONTEXT}/services/search-sync/Dockerfile"
         "realtime|${REALTIME_IMAGE}:${MICROSERVICE_TAG}|${BUILD_CONTEXT}/services/realtime/Dockerfile"
         "analytics|${ANALYTICS_IMAGE}:${MICROSERVICE_TAG}|${BUILD_CONTEXT}/services/analytics/Dockerfile"
+        "webhook|${WEBHOOK_IMAGE}:${MICROSERVICE_TAG}|${BUILD_CONTEXT}/services/webhook/Dockerfile"
     )
 
     # Create a temp dir for parallel build logs (so output stays clean)
@@ -607,7 +609,15 @@ helm upgrade --install "$APP_RELEASE" \
     --set analytics.resources.limits.cpu=250m \
     --set analytics.resources.limits.memory=256Mi \
     --set analytics.resources.requests.cpu=100m \
-    --set analytics.resources.requests.memory=128Mi >/dev/null 2>&1
+    --set analytics.resources.requests.memory=128Mi \
+    --set webhook.enabled=true \
+    --set webhook.image.repository="${WEBHOOK_IMAGE}" \
+    --set webhook.image.tag="${MICROSERVICE_TAG}" \
+    --set webhook.image.pullPolicy=Never \
+    --set webhook.resources.limits.cpu=250m \
+    --set webhook.resources.limits.memory=256Mi \
+    --set webhook.resources.requests.cpu=100m \
+    --set webhook.resources.requests.memory=128Mi >/dev/null 2>&1
 
 if [[ $? -ne 0 ]]; then
     write_err "Helm deploy failed"
@@ -799,6 +809,31 @@ if echo "$ANALYTICS_HEALTH" | grep -q "ok"; then
     write_ok "Analytics service is healthy"
 else
     write_err "Analytics service health check failed"
+fi
+
+# Wait for webhook pod to be ready.
+write_info "Waiting for webhook pod to be ready..."
+kubectl wait --namespace "$APP_NAMESPACE" \
+    --for=condition=ready pod \
+    --selector="app.kubernetes.io/component=webhook" \
+    --timeout=120s >/dev/null 2>&1
+
+if [[ $? -ne 0 ]]; then
+    write_err "webhook pod did not become ready"
+    write_info "Check: kubectl logs -n $APP_NAMESPACE -l app.kubernetes.io/component=webhook"
+    exit 1
+fi
+write_ok "webhook pod is running"
+
+# Verify the webhook health endpoint.
+write_info "Testing webhook service health endpoint..."
+WEBHOOK_HEALTH=$(kubectl exec -n "$APP_NAMESPACE" deployment/"$APP_RELEASE" \
+    -- node -e "fetch('http://${APP_RELEASE}-webhook:3003/health').then(r=>r.text()).then(t=>console.log(t))" 2>/dev/null || echo "")
+
+if echo "$WEBHOOK_HEALTH" | grep -q "ok"; then
+    write_ok "Webhook service is healthy"
+else
+    write_err "Webhook service health check failed"
 fi
 
 # ============================================================================
@@ -1000,6 +1035,19 @@ else
     write_err "Search-sync Service not found"
 fi
 
+# --- 9a-8: Verify webhook Deployment and Service ---
+if kubectl get deployment -n "$APP_NAMESPACE" 2>/dev/null | grep -q "webhook"; then
+    write_ok "Webhook Deployment created"
+else
+    write_err "Webhook Deployment not found"
+fi
+
+if kubectl get svc -n "$APP_NAMESPACE" 2>/dev/null | grep -q "webhook"; then
+    write_ok "Webhook Service created"
+else
+    write_err "Webhook Service not found"
+fi
+
 # --- 9b: ServiceMonitor created (skip if monitoring disabled) ---
 if [[ "$SKIP_MONITORING" != true ]]; then
     if kubectl get servicemonitor -n "$APP_NAMESPACE" 2>/dev/null | grep -q "task-manager"; then
@@ -1100,6 +1148,9 @@ if [[ "$SKIP_MONITORING" == true ]]; then
     - MinIO (internal)        : StatefulSet, S3-compatible object storage
     - Search sync (internal)  : ClusterIP:3006, indexes tasks to Meilisearch
     - Meilisearch (internal)  : StatefulSet, full-text search engine
+    - Realtime (internal)     : ClusterIP:3001, WebSocket gateway
+    - Analytics (internal)    : ClusterIP:8000, Python analytics + weekly reports
+    - Webhook (internal)      : ClusterIP:3003, webhook delivery with retry
 
   Next steps:
 
@@ -1124,6 +1175,9 @@ else
     - MinIO (internal)        : StatefulSet, S3-compatible object storage
     - Search sync (internal)  : ClusterIP:3006, indexes tasks to Meilisearch
     - Meilisearch (internal)  : StatefulSet, full-text search engine
+    - Realtime (internal)     : ClusterIP:3001, WebSocket gateway
+    - Analytics (internal)    : ClusterIP:8000, Python analytics + weekly reports
+    - Webhook (internal)      : ClusterIP:3003, webhook delivery with retry
 
   Next steps:
 

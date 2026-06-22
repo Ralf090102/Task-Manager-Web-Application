@@ -1,6 +1,6 @@
 # Stage 2 - Phase 1, 2 & 3 Learning Summary
 
-This document explains the core concepts and technologies implemented in Phases 1-3 of the Task Manager microservices expansion. It covers Module 7 (Recurring Task Scheduler), Module 1 (Notification Service), Module 2 (File Service + MinIO), Module 5 (Search Sync + Meilisearch), Module 4 (Real-time WebSocket Gateway), and Module 3 (Analytics & Reporting Service). Each section includes real examples from your codebase.
+This document explains the core concepts and technologies implemented in Phases 1-3 of the Task Manager microservices expansion. It covers Module 7 (Recurring Task Scheduler), Module 1 (Notification Service), Module 2 (File Service + MinIO), Module 5 (Search Sync + Meilisearch), Module 4 (Real-time WebSocket Gateway), Module 3 (Analytics & Reporting Service), and Module 6 (Webhook Delivery Service). Each section includes real examples from your codebase.
 
 ---
 
@@ -56,7 +56,7 @@ This document explains the core concepts and technologies implemented in Phases 
 43. [Phase 2 Key Patterns and Best Practices](#phase-2-key-patterns-and-best-practices)
 44. [Phase 2 Troubleshooting](#phase-2-troubleshooting)
 
-### Phase 3: Real-time WebSocket + Analytics
+### Phase 3: Real-time WebSocket + Analytics + Webhooks
 
 45. [WebSocket Protocol and Socket.io](#websocket-protocol-and-socketio)
 46. [Socket.io Server Architecture](#socketio-server-architecture)
@@ -78,6 +78,18 @@ This document explains the core concepts and technologies implemented in Phases 
 62. [Graceful Degradation for Optional Services](#graceful-degradation-for-optional-services)
 63. [Phase 3 Key Patterns and Best Practices](#phase-3-key-patterns-and-best-practices)
 64. [Phase 3 Troubleshooting](#phase-3-troubleshooting)
+65. [Webhook Delivery Service Architecture](#webhook-delivery-service-architecture)
+66. [Webhook Registration Schema Design](#webhook-registration-schema-design)
+67. [The /trigger Endpoint (Internal Event Receiver)](#the-trigger-endpoint-internal-event-receiver)
+68. [Background Delivery Worker (Polling Pattern)](#background-delivery-worker-polling-pattern)
+69. [HMAC Signature for Payload Verification](#hmac-signature-for-payload-verification)
+70. [Exponential Backoff Retry and Dead Letter Queue](#exponential-backoff-retry-and-dead-letter-queue)
+71. [Kubernetes ConfigMap for Tunable Configuration](#kubernetes-configmap-for-tunable-configuration)
+72. [Graceful Shutdown with terminationGracePeriodSeconds](#graceful-shutdown-with-terminationgraceperiodseconds)
+73. [Webhook CRUD API and Secret Management](#webhook-crud-api-and-secret-management)
+74. [Fire-and-Forget Trigger Pattern (Webhook vs Realtime)](#fire-and-forget-trigger-pattern-webhook-vs-realtime)
+75. [Phase 3 Module 6 Key Patterns and Best Practices](#phase-3-module-6-key-patterns-and-best-practices)
+76. [Phase 3 Module 6 Troubleshooting](#phase-3-module-6-troubleshooting)
 
 ---
 
@@ -98,7 +110,7 @@ task-manager/
 │   ├── analytics/                 # Module 3 (implemented)
 │   ├── realtime/                  # Module 4 (implemented)
 │   ├── search-sync/               # Module 5 (implemented)
-│   ├── webhook/                   # Module 6 (future)
+│   ├── webhook/                   # Module 6 (implemented)
 │   ├── scheduler/                 # Module 7 (implemented)
 │   └── team-service/              # Module 8 (future)
 ├── helm-chart/
@@ -3060,6 +3072,18 @@ This phase teaches you WebSocket protocols, Socket.io rooms/broadcasting, NGINX 
 62. [Graceful Degradation for Optional Services](#graceful-degradation-for-optional-services)
 63. [Phase 3 Key Patterns and Best Practices](#phase-3-key-patterns-and-best-practices)
 64. [Phase 3 Troubleshooting](#phase-3-troubleshooting)
+65. [Webhook Delivery Service Architecture](#webhook-delivery-service-architecture)
+66. [Webhook Registration Schema Design](#webhook-registration-schema-design)
+67. [The /trigger Endpoint (Internal Event Receiver)](#the-trigger-endpoint-internal-event-receiver)
+68. [Background Delivery Worker (Polling Pattern)](#background-delivery-worker-polling-pattern)
+69. [HMAC Signature for Payload Verification](#hmac-signature-for-payload-verification)
+70. [Exponential Backoff Retry and Dead Letter Queue](#exponential-backoff-retry-and-dead-letter-queue)
+71. [Kubernetes ConfigMap for Tunable Configuration](#kubernetes-configmap-for-tunable-configuration)
+72. [Graceful Shutdown with terminationGracePeriodSeconds](#graceful-shutdown-with-terminationgraceperiodseconds)
+73. [Webhook CRUD API and Secret Management](#webhook-crud-api-and-secret-management)
+74. [Fire-and-Forget Trigger Pattern (Webhook vs Realtime)](#fire-and-forget-trigger-pattern-webhook-vs-realtime)
+75. [Phase 3 Module 6 Key Patterns and Best Practices](#phase-3-module-6-key-patterns-and-best-practices)
+76. [Phase 3 Module 6 Troubleshooting](#phase-3-module-6-troubleshooting)
 
 ---
 
@@ -4746,6 +4770,1287 @@ kubectl exec deployment/task-manager -n task-manager -- printenv REALTIME_URL
 
 ---
 
+## Webhook Delivery Service Architecture
+
+### What Are Webhooks?
+
+A **webhook** is an HTTP callback: when something happens in your app, your server sends an HTTP POST request to a URL that the user registered. It's how systems like Stripe, GitHub, and Slack notify external services about events.
+
+```
+Task Manager                          External Service
+   |                                        |
+   |--- Task created ---------------------->|
+   |    POST https://example.com/webhook     |
+   |    Body: { event: "task.created", ... } |
+   |                                        |
+   |<--- 200 OK ----------------------------|
+   |
+```
+
+The external service registers a URL ("call me when tasks are created"). When a task is created, the webhook service delivers an HTTP POST to that URL. The external service processes the event and responds.
+
+### Why a Dedicated Webhook Service?
+
+Without a dedicated service, the main app would need to:
+1. Know which webhooks to trigger for each event
+2. Make HTTP calls to external URLs (slow, unreliable)
+3. Retry failed deliveries (complex logic)
+4. Track delivery status (extra database writes in the request path)
+
+This adds latency to user-facing requests. If the external URL is slow (5s timeout), the user waits 5s for their "create task" response. That's unacceptable.
+
+**The solution**: decouple event detection from delivery. The main app fires a quick internal call to the webhook service. The webhook service queues the delivery in a database table. A background worker delivers it asynchronously — the user never waits for external HTTP calls.
+
+```
+User                Main App           Webhook Service           External URL
+  |                    |                      |                        |
+  |-- Create task ---->|                      |                        |
+  |                    |-- POST /trigger ---->|                        |
+  |                    |   (fire-and-forget)  |                        |
+  |<--- 201 Created ---|                      |                        |
+  |                    |                      |                        |
+  |                    |               [Background Worker]             |
+  |                    |                      |-- POST external ------>|
+  |                    |                      |   (HMAC signed)        |
+  |                    |                      |<--- 200 OK ------------|
+  |                    |                      |                        |
+```
+
+### The Database-as-Queue Pattern
+
+The webhook service uses the `WebhookDelivery` table as a **durable queue**. Each row is a job:
+
+| Queue Concept | Database Implementation |
+|---------------|------------------------|
+| Enqueue | `INSERT INTO "WebhookDelivery" (status: "pending")` |
+| Dequeue | `SELECT ... WHERE status = "pending" AND nextRetryAt <= now()` |
+| Complete | `UPDATE ... SET status = "delivered"` |
+| Retry | `UPDATE ... SET nextRetryAt = now() + backoff` |
+| Dead letter | `UPDATE ... SET status = "failed"` |
+
+**Why a database queue instead of Redis/RabbitMQ?**
+
+| Database Queue | Message Broker (Redis/RabbitMQ) |
+|----------------|--------------------------------|
+| No extra infrastructure | Additional service to deploy/maintain |
+| ACID guarantees (delivery record survives crashes) | Messages can be lost on broker crash |
+| Easy to inspect/replay (just query the table) | Need broker-specific tools to inspect |
+| Slower (SQL query per poll cycle) | Faster (in-memory) |
+| Fine for low volume | Better for high throughput |
+
+For a task manager with moderate event volume, the database queue is the right tradeoff: simplicity and durability over raw throughput.
+
+### How the Components Fit Together
+
+The webhook service has two concurrent parts:
+
+1. **HTTP server** (Fastify, port 3003): receives `/trigger` requests from the main app, creates delivery records
+2. **Background worker** (infinite loop): polls for pending deliveries and delivers them via HTTP
+
+```typescript
+// HTTP server — handles incoming trigger requests
+app.post("/trigger", async (req, reply) => {
+  const { event, data, userId } = req.body;
+  const webhooks = await prisma.webhook.findMany({
+    where: { userId, active: true, events: { has: event } },
+  });
+  for (const webhook of webhooks) {
+    await prisma.webhookDelivery.create({
+      data: { webhookId: webhook.id, event, payload: data, status: "pending", nextRetryAt: new Date() },
+    });
+  }
+  return { queued: webhooks.length };
+});
+
+// Background worker — runs concurrently alongside the HTTP server
+async function processDeliveries() {
+  while (!shuttingDown) {
+    const pending = await prisma.webhookDelivery.findMany({
+      where: { status: "pending", nextRetryAt: { lte: new Date() } },
+      include: { webhook: true },
+      take: 10,
+    });
+    for (const delivery of pending) {
+      await deliver(delivery);
+    }
+    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+  }
+}
+```
+
+Both run in the same process — `processDeliveries()` is called right after `app.listen()` and runs concurrently via the Node.js event loop.
+
+---
+
+## Webhook Registration Schema Design
+
+### Two-Table Design: Registration vs Delivery
+
+The webhook system uses **two Prisma models** that separate concerns:
+
+```prisma
+model Webhook {
+  id         String            @id @default(cuid())
+  userId     String
+  user       User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  url        String
+  events     String[]
+  secret     String
+  active     Boolean           @default(true)
+  deliveries WebhookDelivery[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+}
+
+model WebhookDelivery {
+  id          String   @id @default(cuid())
+  webhookId   String
+  webhook     Webhook  @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+  event       String
+  payload     Json
+  statusCode  Int?
+  response    String?
+  attempts    Int      @default(0)
+  maxAttempts Int      @default(5)
+  nextRetryAt DateTime?
+  deliveredAt DateTime?
+  status      String   @default("pending")
+  createdAt   DateTime @default(now())
+
+  @@index([webhookId])
+  @@index([status])
+  @@index([nextRetryAt])
+}
+```
+
+| Model | Purpose | Created By | Lifetime |
+|-------|---------|------------|----------|
+| `Webhook` | Registration (URL, events, secret) | User via API | Until user deletes it |
+| `WebhookDelivery` | Individual delivery attempt tracking | `/trigger` endpoint | Until cascade-deleted with webhook |
+
+### Key Design Decisions
+
+**`events String[]`** — Prisma's native array type (backed by PostgreSQL `text[]`). A webhook can listen to multiple events: `["task.created", "task.updated"]`. The query `events: { has: event }` checks if the array contains a specific event.
+
+**`payload Json`** — Stores the full task data as JSON. This means the delivery record is self-contained: even if the task is later deleted, the delivery still has the original payload. PostgreSQL's `jsonb` type allows efficient storage and querying.
+
+**`secret String`** — The HMAC signing key. Auto-generated on creation (`crypto.randomBytes(32).toString("hex")`), never returned in API responses (stripped with `secret: undefined`). Used to sign every delivery so the receiver can verify authenticity.
+
+**`statusCode Int?`, `response String?`** — Nullable because they're only set after a delivery attempt. Before the first attempt, they're `null`.
+
+**`nextRetryAt DateTime?`** — Controls when the worker picks up this delivery. Set to `now()` on creation (immediate delivery), then updated to `now() + backoff` on failure. `null` when permanently failed (dead letter).
+
+### Why Three Indexes on WebhookDelivery?
+
+```prisma
+@@index([webhookId])    // Fast lookup: "all deliveries for this webhook"
+@@index([status])       // Fast filtering: "all pending deliveries"
+@@index([nextRetryAt])  // Fast polling: "pending deliveries ready now"
+```
+
+The background worker's poll query is:
+```sql
+SELECT * FROM "WebhookDelivery"
+WHERE status = 'pending'
+  AND "nextRetryAt" <= NOW()
+LIMIT 10
+```
+
+Without the `nextRetryAt` index, this query does a full table scan on every poll cycle (every 2 seconds). With thousands of delivery records, that's a performance problem. The composite index on `[status, nextRetryAt]` (or separate indexes that the query planner can combine) makes this query near-instant.
+
+### Cascade Deletes
+
+```prisma
+webhook     Webhook  @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+```
+
+When a user deletes a webhook, all its delivery records are automatically deleted. This prevents orphaned records cluttering the database. The same applies to the `User → Webhook` relation — deleting a user cascades to their webhooks, which cascades to deliveries.
+
+---
+
+## The /trigger Endpoint (Internal Event Receiver)
+
+### How the Main App Fires Events
+
+When a task is created, updated, or deleted, the main app calls `triggerWebhook()`:
+
+```typescript
+// src/lib/webhook.ts
+const WEBHOOK_URL = process.env.WEBHOOK_URL;
+
+export async function triggerWebhook(
+  event: string,
+  data: unknown,
+  userId: string
+): Promise<void> {
+  if (!WEBHOOK_URL) return;  // Graceful degradation — skip if service not configured
+
+  try {
+    await fetch(`${WEBHOOK_URL}/trigger`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ event, data, userId }),
+    });
+  } catch {
+    // Silent fail — webhook service handles retries independently
+  }
+}
+```
+
+Key characteristics:
+- **Guard clause**: `if (!WEBHOOK_URL) return` — if the env var isn't set, the function returns immediately. The webhook service is optional.
+- **Silent catch**: If the webhook service is down, the error is swallowed. The main app's operation (create/update/delete task) still succeeds. The user never sees an error because webhooks failed.
+- **No retry from the main app**: The `/trigger` call is best-effort. If it fails, those events are lost. This is acceptable because the main app's job is to serve the user, not guarantee webhook delivery. The retry logic lives entirely in the webhook service's background worker.
+
+### The /trigger Handler
+
+```typescript
+app.post("/trigger", async (req, reply) => {
+  const { event, data, userId } = req.body as TriggerBody;
+
+  if (!event || !userId) {
+    return reply.status(400).send({ error: "event and userId are required" });
+  }
+
+  // Find all active webhooks for this user that listen to this event
+  const webhooks = await prisma.webhook.findMany({
+    where: { userId, active: true, events: { has: event } },
+  });
+
+  // Create a pending delivery for each matching webhook
+  for (const webhook of webhooks) {
+    await prisma.webhookDelivery.create({
+      data: {
+        webhookId: webhook.id,
+        event,
+        payload: data as never,
+        status: "pending",
+        nextRetryAt: new Date(),
+      },
+    });
+  }
+
+  return { queued: webhooks.length };
+});
+```
+
+### The `events: { has: event }` Filter
+
+Prisma's `has` operator on array fields generates PostgreSQL's array containment check:
+
+```sql
+-- Prisma: events: { has: "task.created" }
+-- SQL:    '"events" = ANY(events)' or 'events @> ARRAY["task.created"]'
+```
+
+This lets a webhook register for multiple events (`["task.created", "task.updated"]`) and only receive deliveries for events it cares about.
+
+### Why /trigger Is Internal-Only
+
+The webhook service is a ClusterIP Service with no Ingress route:
+
+```yaml
+# templates/webhook/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: task-manager-webhook
+spec:
+  type: ClusterIP   # No external access
+  ports:
+    - port: 3003
+      targetPort: http
+```
+
+This means `/trigger` is only accessible from inside the cluster. External users can't forge trigger requests. The main app's `WEBHOOK_URL` is `http://task-manager-webhook:3003` — a cluster-internal DNS name.
+
+### Where Triggers Are Called
+
+```typescript
+// src/app/api/tasks/route.ts (POST — create task)
+const task = await prisma.task.create({ data });
+emitToRealtime("task:created", task);    // Real-time push to browsers
+triggerWebhook("task.created", task, userId);  // Queue webhook delivery
+return NextResponse.json(task, { status: 201 });
+
+// src/app/api/tasks/[id]/route.ts (PATCH — update, DELETE — delete)
+emitToRealtime("task:updated", task);
+triggerWebhook("task.updated", task, userId);
+```
+
+Both `emitToRealtime` and `triggerWebhook` are called after the database mutation succeeds. They run in parallel (fire-and-forget) and don't block the response.
+
+---
+
+## Background Delivery Worker (Polling Pattern)
+
+### The Infinite Loop
+
+The delivery worker is a function that never returns (until shutdown):
+
+```typescript
+async function processDeliveries(): Promise<void> {
+  app.log.info("[webhook] Background delivery worker started");
+
+  while (!shuttingDown) {
+    try {
+      // Poll for pending deliveries that are ready to be sent
+      const pending = await prisma.webhookDelivery.findMany({
+        where: {
+          status: "pending",
+          nextRetryAt: { lte: new Date() },
+        },
+        include: { webhook: true },
+        take: 10,
+      });
+
+      for (const delivery of pending) {
+        if (shuttingDown) break;  // Stop mid-batch if shutting down
+        await deliver(delivery);
+      }
+    } catch (err) {
+      app.log.error({ err }, "[webhook] Worker loop error");
+    }
+
+    // Wait before next poll cycle
+    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+  }
+
+  app.log.info("[webhook] Background delivery worker stopped");
+}
+```
+
+### How It Works Step by Step
+
+```
+[Worker Loop]
+     |
+     v
+Poll DB: SELECT pending deliveries WHERE nextRetryAt <= NOW() LIMIT 10
+     |
+     +-- 0 results --> sleep 2s --> loop back
+     |
+     +-- N results --> deliver each one sequentially
+     |                       |
+     |                       +-- Success: mark "delivered", set deliveredAt
+     |                       |
+     |                       +-- Failure: increment attempts, set nextRetryAt = now + backoff
+     |                                      (or mark "failed" if maxed out)
+     |
+     v
+Sleep 2s (POLL_INTERVAL_MS)
+     |
+     v
+Loop back to top
+```
+
+### Why Polling Instead of Event-Driven?
+
+You might wonder: why not use a message queue (RabbitMQ, Redis) or database LISTEN/NOTIFY instead of polling every 2 seconds?
+
+| Approach | Pros | Cons |
+|----------|------|------|
+| **Database polling** (chosen) | No extra infrastructure, crash-safe, simple to inspect | Slight latency (up to 2s), constant DB queries |
+| **Message broker** (RabbitMQ/Redis) | Low latency, high throughput | Extra service to deploy/maintain, message loss risk on crash |
+| **PostgreSQL LISTEN/NOTIFY** | Real-time, no polling | Notification lost if listener is disconnected, complex to implement |
+
+For this project's scale, polling is the simplest reliable approach. The 2-second latency is acceptable for webhooks (they're not real-time UI updates). The constant DB queries are cheap with proper indexes.
+
+### Batch Processing with `take: 10`
+
+The worker fetches at most 10 deliveries per poll cycle. This prevents one slow external URL from blocking all deliveries:
+
+- If 50 deliveries are pending, the worker processes the first 10, sleeps 2s, then processes the next 10
+- If the external URL takes 5s per call, one batch takes up to 50s — but the loop doesn't starve other operations because Node.js handles HTTP requests concurrently
+- The `take` limit also prevents memory spikes if thousands of deliveries accumulate
+
+### The `shuttingDown` Flag Check
+
+```typescript
+for (const delivery of pending) {
+  if (shuttingDown) break;  // Stop mid-batch
+  await deliver(delivery);
+}
+```
+
+This check inside the loop ensures that even mid-batch, the worker stops promptly when SIGTERM is received. Without it, a batch of 10 slow deliveries could take minutes to finish during shutdown.
+
+---
+
+## HMAC Signature for Payload Verification
+
+### The Problem: How Does the Receiver Trust the Webhook?
+
+When the webhook service sends a POST to `https://example.com/webhook`, the receiver needs to verify:
+
+1. **Authenticity**: This request actually came from the Task Manager, not an attacker
+2. **Integrity**: The payload wasn't tampered with in transit
+
+Without verification, anyone who discovers the webhook URL can send fake events.
+
+### HMAC: Hash-based Message Authentication Code
+
+**HMAC** combines a cryptographic hash function (SHA-256) with a secret key to produce a signature. Only someone with the secret can produce the correct signature. The receiver, who also has the secret, recomputes the HMAC and compares.
+
+```
+Sender (webhook service)                    Receiver (external service)
+  |                                           |
+  | secret = "abc123..."                      | secret = "abc123..." (same)
+  | body = '{"event":"task.created",...}'     |
+  | signature = HMAC-SHA256(secret, body)     |
+  |                                           |
+  |--- POST body + X-Webhook-Signature ------>|
+  |    sha256=9f8a2b...                       |
+  |                                           |
+  |                                           | computed = HMAC-SHA256(secret, body)
+  |                                           | if computed == signature → verified!
+```
+
+### Implementation
+
+```typescript
+import crypto from "crypto";
+
+async function deliver(delivery: DeliveryWithWebhook): Promise<void> {
+  const body = JSON.stringify({
+    event: delivery.event,
+    timestamp: new Date().toISOString(),
+    data: delivery.payload,
+  });
+
+  // Compute HMAC signature
+  const signature = crypto
+    .createHmac("sha256", delivery.webhook.secret)
+    .update(body)
+    .digest("hex");
+
+  const response = await fetch(delivery.webhook.url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Webhook-Event": delivery.event,
+      "X-Webhook-Signature": `sha256=${signature}`,
+    },
+    body,
+    signal: AbortSignal.timeout(DELIVERY_TIMEOUT_MS),
+  });
+  // ...
+}
+```
+
+### Breaking Down the HMAC
+
+1. **`crypto.createHmac("sha256", secret)`** — Creates an HMAC object using SHA-256 and the webhook's secret key
+2. **`.update(body)`** — Feeds the JSON body into the HMAC computation
+3. **`.digest("hex")`** — Produces the final signature as a hex string (64 characters for SHA-256)
+
+The `X-Webhook-Signature` header format is `sha256=<hex>`. The `sha256=` prefix tells the receiver which algorithm was used (allowing future algorithm upgrades).
+
+### How the Receiver Verifies
+
+The external service receiving the webhook would verify it like this:
+
+```javascript
+// On the receiver side
+const crypto = require("crypto");
+
+app.post("/webhook", (req, res) => {
+  const signature = req.headers["x-webhook-signature"];  // "sha256=9f8a2b..."
+  const body = JSON.stringify(req.body);  // Raw body
+
+  const expected = "sha256=" + crypto
+    .createHmac("sha256", WEBHOOK_SECRET)  // Same secret
+    .update(body)
+    .digest("hex");
+
+  if (signature !== expected) {
+    return res.status(401).send("Invalid signature");
+  }
+
+  // Process the event
+  res.status(200).send("OK");
+});
+```
+
+### Secret Generation and Storage
+
+The secret is generated when the webhook is created:
+
+```typescript
+// src/app/api/webhooks/route.ts
+const webhook = await prisma.webhook.create({
+  data: {
+    url,
+    events,
+    active: active ?? true,
+    secret: crypto.randomBytes(32).toString("hex"),  // 64-char hex string
+    userId: session.user.id,
+  },
+});
+
+return NextResponse.json(
+  { ...webhook, secret: undefined },  // Never return the secret!
+  { status: 201 }
+);
+```
+
+- **`crypto.randomBytes(32)`** — 32 random bytes = 256 bits of entropy (cryptographically secure)
+- **`.toString("hex")`** — Encodes as 64-character hex string
+- **`secret: undefined`** — The secret is stripped from the API response. It's only available once — at creation time (though in this implementation, even creation response strips it; the secret is known only to the database and the HMAC computation)
+
+This is the same pattern Stripe and GitHub use: each webhook has a unique signing secret that the receiver stores securely.
+
+---
+
+## Exponential Backoff Retry and Dead Letter Queue
+
+### Why Retries Are Necessary
+
+External URLs can fail for many reasons:
+- Server is temporarily down (503 Service Unavailable)
+- Rate limiting (429 Too Many Requests)
+- Network timeout (DNS issues, packet loss)
+- Slow response (the server takes >10s to respond)
+
+Without retries, a single transient failure means a lost webhook delivery. The external service never learns about the event.
+
+### The Retry Strategy
+
+```
+Attempt 1: Immediate (nextRetryAt = creation time)
+    ↓ Fail
+Attempt 2: Wait 1 second
+    ↓ Fail
+Attempt 3: Wait 5 seconds
+    ↓ Fail
+Attempt 4: Wait 30 seconds
+    ↓ Fail
+Attempt 5: Wait 2 minutes
+    ↓ Fail
+Status: "failed" (dead letter — no more retries)
+```
+
+The backoff intervals are `1, 5, 30, 120, 600` seconds (1s, 5s, 30s, 2m, 10m).
+
+### Implementation
+
+```typescript
+} catch (err) {
+  const attempts = delivery.attempts + 1;
+  const maxedOut = attempts >= MAX_ATTEMPTS;
+
+  // Calculate backoff for this attempt
+  const backoffIndex = Math.min(attempts - 1, BACKOFF_INTERVALS.length - 1);
+  const backoffMs = BACKOFF_INTERVALS[backoffIndex] ?? 600000;
+
+  await prisma.webhookDelivery.update({
+    where: { id: delivery.id },
+    data: {
+      attempts,
+      status: maxedOut ? "failed" : "pending",
+      nextRetryAt: maxedOut ? null : new Date(Date.now() + backoffMs),
+      response: err instanceof Error ? err.message.slice(0, 500) : String(err),
+    },
+  });
+
+  if (maxedOut) {
+    app.log.error(
+      { deliveryId: delivery.id, attempts, err },
+      "[webhook] Delivery permanently failed (dead letter)"
+    );
+  } else {
+    app.log.warn(
+      { deliveryId: delivery.id, attempts, nextRetryIn: backoffMs },
+      "[webhook] Delivery failed, will retry"
+    );
+  }
+}
+```
+
+### Breaking Down the Backoff Calculation
+
+```typescript
+const backoffIndex = Math.min(attempts - 1, BACKOFF_INTERVALS.length - 1);
+```
+
+This line maps attempt numbers to backoff intervals:
+
+| Attempt (after failure) | `attempts - 1` | `backoffIndex` | Interval | Wait Time |
+|--------------------------|-----------------|-----------------|----------|-----------|
+| 1st failure | 0 | 0 | `BACKOFF_INTERVALS[0]` | 1s |
+| 2nd failure | 1 | 1 | `BACKOFF_INTERVALS[1]` | 5s |
+| 3rd failure | 2 | 2 | `BACKOFF_INTERVALS[2]` | 30s |
+| 4th failure | 3 | 3 | `BACKOFF_INTERVALS[3]` | 2m |
+| 5th failure | 4 | 4 | `BACKOFF_INTERVALS[4]` | 10m |
+
+The `Math.min` cap prevents index-out-of-bounds if attempts somehow exceed the array length.
+
+### Why Exponential Backoff?
+
+Linear backoff (1s, 2s, 3s, 4s) is too aggressive — it doesn't give the external service enough time to recover. Fixed backoff (10s every time) wastes time on the first retry.
+
+**Exponential backoff** (increasing intervals) gives the external service increasing time to recover while not delaying early retries unnecessarily:
+
+```
+1s -----> 5s -----> 30s -----> 2m -----> 10m
+```
+
+This is the industry-standard pattern, used by AWS, Stripe, and GitHub webhooks.
+
+### The Dead Letter Queue
+
+When `attempts >= MAX_ATTEMPTS` (5 by default), the delivery is marked `"failed"`:
+
+```typescript
+status: maxedOut ? "failed" : "pending",
+nextRetryAt: maxedOut ? null : new Date(Date.now() + backoffMs),
+```
+
+- **`status: "failed"`** — The worker's poll query (`WHERE status = "pending"`) never picks up failed deliveries
+- **`nextRetryAt: null`** — Even if somehow queried, `null` doesn't satisfy `nextRetryAt <= now()`
+- **The record stays in the database** — Users can inspect failed deliveries via `GET /api/webhooks/[id]` (which includes delivery history)
+
+This is a **dead letter queue** — deliveries that exhausted all retries. They're not deleted (useful for debugging and potential manual replay), but they're never retried automatically.
+
+### Comparison with Module 2 Backoff (File Service)
+
+Both the file service (MinIO bucket creation) and webhook service use exponential backoff, but for different purposes:
+
+| Aspect | File Service (Module 2) | Webhook Service (Module 6) |
+|--------|------------------------|---------------------------|
+| **Purpose** | Wait for MinIO to be ready at startup | Retry failed HTTP deliveries |
+| **Retry target** | MinIO health endpoint | External webhook URL |
+| **Max attempts** | 10 (startup) | 5 (configurable via ConfigMap) |
+| **Backoff** | 1s, 2s, 4s, 8s, ... (powers of 2) | 1s, 5s, 30s, 2m, 10m (configured) |
+| **On exhaustion** | Service exits (crash) | Delivery marked "failed" (dead letter) |
+| **Persistence** | In-memory (lost on restart) | Database (survives restarts) |
+
+The webhook's backoff is more sophisticated because it persists retry state in the database, meaning if the worker restarts mid-retry, deliveries are not lost.
+
+---
+
+## Kubernetes ConfigMap for Tunable Configuration
+
+### ConfigMap vs Secret
+
+Kubernetes has two resources for injecting configuration into pods:
+
+| ConfigMap | Secret |
+|-----------|--------|
+| Non-sensitive data | Sensitive data (passwords, API keys) |
+| Stored in plain text | Stored base64-encoded |
+| Readable by anyone with cluster access | Access can be restricted via RBAC |
+| Example: retry config, log level | Example: DATABASE_URL, SMTP password |
+
+For the webhook service:
+- **Secret**: `DATABASE_URL` (contains database credentials)
+- **ConfigMap**: `MAX_ATTEMPTS`, `BACKOFF_INTERVALS`, `POLL_INTERVAL_MS`, `DELIVERY_TIMEOUT_MS` (operational parameters)
+
+### The ConfigMap Template
+
+```yaml
+# templates/webhook/configmap.yaml
+{{- if .Values.webhook.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "task-manager.fullname" . }}-webhook-config
+  labels:
+    {{- include "task-manager.labels" . | nindent 4 }}
+    app.kubernetes.io/component: webhook
+data:
+  MAX_ATTEMPTS: "{{ .Values.webhook.retry.maxAttempts | default 5 }}"
+  BACKOFF_INTERVALS: "{{ join "," (.Values.webhook.retry.intervals | default (list 1 5 30 120 600)) }}"
+  POLL_INTERVAL_MS: "2000"
+  DELIVERY_TIMEOUT_MS: "10000"
+{{- end }}
+```
+
+The Helm template reads from `values.yaml`:
+```yaml
+# values.yaml
+webhook:
+  enabled: true
+  retry:
+    maxAttempts: 5
+    intervals: [1, 5, 30, 120, 600]  # seconds
+```
+
+### `envFrom: configMapRef`
+
+The deployment injects all ConfigMap keys as environment variables using `envFrom`:
+
+```yaml
+# templates/webhook/deployment.yaml
+spec:
+  containers:
+    - name: webhook
+      envFrom:
+        - configMapRef:
+            name: task-manager-webhook-config   # All keys become env vars
+      env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:                       # Secret injected individually
+              name: task-manager-secrets
+              key: database-url
+```
+
+| `envFrom` (ConfigMap) | `env` + `valueFrom` (Secret) |
+|------------------------|------------------------------|
+| Injects ALL keys at once | One entry per variable |
+| `MAX_ATTEMPTS`, `BACKOFF_INTERVALS`, etc. become env vars | Only `DATABASE_URL` is injected |
+| Simpler syntax for bulk config | More explicit for individual secrets |
+
+The Node.js code reads these as regular environment variables:
+
+```typescript
+const MAX_ATTEMPTS = parseInt(process.env.MAX_ATTEMPTS || "5", 10);
+const BACKOFF_INTERVALS = (process.env.BACKOFF_INTERVALS || "1,5,30,120,600")
+  .split(",")
+  .map((s) => parseInt(s.trim(), 10) * 1000);  // Convert seconds to milliseconds
+const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || "2000", 10);
+const DELIVERY_TIMEOUT_MS = parseInt(process.env.DELIVERY_TIMEOUT_MS || "10000", 10);
+```
+
+### Why ConfigMap Instead of Hardcoding?
+
+If retry settings were hardcoded in the source code, changing them would require:
+1. Edit code → rebuild Docker image → push to registry → `minikube image load` → restart pod
+
+With ConfigMap:
+1. Edit Helm values → `helm upgrade` → pod restarts with new env vars
+
+This is dramatically faster for tuning. If the external webhook URL is rate-limiting (429), you can increase backoff intervals in seconds without a code change or image rebuild.
+
+### Verifying the ConfigMap
+
+```bash
+kubectl get configmap task-manager-webhook-config -n task-manager -o yaml
+```
+
+Output:
+```yaml
+apiVersion: v1
+kind: ConfigMap
+data:
+  MAX_ATTEMPTS: "5"
+  BACKOFF_INTERVALS: "1,5,30,120,600"
+  POLL_INTERVAL_MS: "2000"
+  DELIVERY_TIMEOUT_MS: "10000"
+```
+
+You can also verify inside the pod:
+```bash
+kubectl exec deployment/task-manager-webhook -n task-manager -- printenv | sort
+```
+
+---
+
+## Graceful Shutdown with terminationGracePeriodSeconds
+
+### The Kubernetes Pod Termination Sequence
+
+When Kubernetes terminates a pod (e.g., during scaling, rollout, or node drain), it follows this sequence:
+
+```
+1. Pod enters "Terminating" state
+2. ENDPOINTS controller removes pod from Service (no new traffic)
+3. Kubernetes sends SIGTERM to container
+4. Container has terminationGracePeriodSeconds to clean up (default: 30s)
+5. If still running after grace period → SIGKILL (forced kill)
+```
+
+### Why Graceful Shutdown Matters for Webhooks
+
+The webhook service has a background worker that may be mid-delivery when SIGTERM arrives. If the process is killed immediately:
+
+- **In-flight HTTP request** to external URL is aborted (delivery lost)
+- **Database connection** may leak (connection pool exhausted over time)
+- **Delivery status** never updated (record stuck in "pending" forever)
+
+### The Graceful Shutdown Handler
+
+```typescript
+let shuttingDown = false;
+
+async function gracefulShutdown(signal: string) {
+  app.log.info(`[webhook] ${signal} received, shutting down...`);
+  shuttingDown = true;
+
+  // Wait for the current poll cycle to finish
+  await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS + 100));
+
+  // Close Fastify (stop accepting new HTTP requests)
+  await app.close();
+
+  // Disconnect Prisma (release database connections)
+  await prisma.$disconnect();
+
+  app.log.info("[webhook] Shutdown complete");
+  process.exit(0);
+}
+
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+```
+
+Step by step:
+
+1. **Set `shuttingDown = true`** — The worker loop checks this flag before each delivery (`if (shuttingDown) break`). The current delivery finishes, but no new ones start.
+
+2. **Wait `POLL_INTERVAL_MS + 100`ms** — Gives the worker time to complete its current poll cycle. If the worker just started a batch of 10 deliveries, this wait lets the current one finish. The `+100` is a small buffer.
+
+3. **`app.close()`** — Closes the Fastify HTTP server. New requests are rejected, in-flight requests are allowed to complete.
+
+4. **`prisma.$disconnect()`** — Releases all database connections back to the pool. Without this, connections leak.
+
+5. **`process.exit(0)`** — Clean exit. Exit code 0 tells Kubernetes the pod shut down gracefully.
+
+### `terminationGracePeriodSeconds: 35`
+
+```yaml
+# templates/webhook/deployment.yaml
+spec:
+  terminationGracePeriodSeconds: 35
+```
+
+This must be longer than the shutdown handler's worst case:
+- Wait: `POLL_INTERVAL_MS + 100` = ~2.1s
+- In-flight delivery timeout: `DELIVERY_TIMEOUT_MS` = 10s
+- Prisma disconnect: ~1s
+- Total worst case: ~13s
+
+35 seconds gives ample headroom. Without this setting, Kubernetes defaults to 30 seconds, which might not be enough if multiple deliveries are in-flight.
+
+### What Happens Without Graceful Shutdown
+
+Without the handler, SIGTERM immediately kills the process:
+
+```
+SIGTERM → process killed immediately
+  - Worker loop stops mid-delivery
+  - HTTP request to external URL is aborted
+  - DB connection leaks
+  - WebhookDelivery record stuck as "pending" (nextRetryAt already passed)
+  - On restart, worker picks it up again → duplicate delivery possible
+```
+
+With the handler:
+```
+SIGTERM → shuttingDown = true
+  - Worker finishes current delivery
+  - Delivery status updated in DB
+  - DB connections released
+  - Clean exit
+```
+
+### The `AbortSignal.timeout` Safety Net
+
+Each delivery has its own timeout to prevent hanging:
+
+```typescript
+const response = await fetch(delivery.webhook.url, {
+  // ...
+  signal: AbortSignal.timeout(DELIVERY_TIMEOUT_MS),  // 10s
+});
+```
+
+If the external URL takes >10s, the fetch is aborted and treated as a failure. This ensures no single delivery can block the shutdown handler for more than 10 seconds.
+
+---
+
+## Webhook CRUD API and Secret Management
+
+### API Endpoints
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/api/webhooks` | List user's webhooks (with delivery count) |
+| `POST` | `/api/webhooks` | Register a new webhook (auto-generates secret) |
+| `GET` | `/api/webhooks/[id]` | Get webhook detail with delivery history |
+| `PATCH` | `/api/webhooks/[id]` | Update URL, events, or active status |
+| `DELETE` | `/api/webhooks/[id]` | Delete webhook (cascade deletes deliveries) |
+
+All endpoints require authentication (`session.user.id`).
+
+### Creating a Webhook: Secret Auto-Generation
+
+```typescript
+// POST /api/webhooks
+export async function POST(req: Request) {
+  const session = await auth();
+  if (!session?.user?.id) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const body = await req.json();
+  const parsed = webhookCreateSchema.safeParse(body);
+
+  if (!parsed.success) {
+    return NextResponse.json(
+      { error: "Validation failed", details: parsed.error.issues },
+      { status: 400 }
+    );
+  }
+
+  const { url, events, active } = parsed.data;
+
+  const webhook = await prisma.webhook.create({
+    data: {
+      url,
+      events,
+      active: active ?? true,
+      secret: crypto.randomBytes(32).toString("hex"),  // Auto-generated
+      userId: session.user.id,
+    },
+  });
+
+  return NextResponse.json(
+    { ...webhook, secret: undefined },  // Secret stripped from response
+    { status: 201 }
+  );
+}
+```
+
+The secret is **never returned** in any API response. It's generated server-side, stored in the database, and used internally by the webhook service to sign deliveries. The `secret: undefined` pattern ensures it's stripped even from the creation response.
+
+### Listing Webhooks: Delivery Count Aggregation
+
+```typescript
+// GET /api/webhooks
+const webhooks = await prisma.webhook.findMany({
+  where: { userId: session.user.id },
+  include: {
+    _count: { select: { deliveries: true } },  // Count related deliveries
+  },
+  orderBy: { createdAt: "desc" },
+});
+
+return NextResponse.json(
+  webhooks.map((w) => ({
+    ...w,
+    secret: undefined,  // Strip secret
+    deliveryCount: w._count.deliveries,
+    _count: undefined,  // Remove Prisma's internal _count object
+  }))
+);
+```
+
+Prisma's `_count` relation aggregation generates a SQL `COUNT` subquery, efficiently computing the delivery count without fetching all delivery records.
+
+### Webhook Detail: Delivery History
+
+```typescript
+// GET /api/webhooks/[id]
+const webhook = await prisma.webhook.findUnique({
+  where: { id, userId: session.user.id },
+  include: {
+    deliveries: {
+      orderBy: { createdAt: "desc" },
+      take: 20,  // Only the 20 most recent deliveries
+    },
+  },
+});
+```
+
+The detail view includes the last 20 delivery records, showing their status (pending/delivered/failed), attempts, and response. This lets users debug webhook failures without direct database access.
+
+### Validation with Zod
+
+```typescript
+// src/lib/validations.ts
+const webhookEventEnum = z.enum([
+  "task.created",
+  "task.updated",
+  "task.deleted",
+]);
+
+export const webhookCreateSchema = z.object({
+  url: z.string().url(),
+  events: z.array(webhookEventEnum).min(1),
+  active: z.boolean().optional(),
+});
+
+export const webhookUpdateSchema = z.object({
+  url: z.string().url().optional(),
+  events: z.array(webhookEventEnum).min(1).optional(),
+  active: z.boolean().optional(),
+});
+```
+
+- **`z.string().url()`** — Validates URL format (prevents malformed webhook targets)
+- **`z.enum([...])`** — Restricts events to known values (prevents typos like `task.craeted`)
+- **`.min(1)`** — At least one event must be selected (empty array rejected)
+- **`.optional()`** — Update schema allows partial updates (only specified fields are updated)
+
+### Security Model
+
+| Who | What they can see |
+|-----|-------------------|
+| Authenticated user | Their own webhooks (filtered by `userId`) |
+| Authenticated user | Delivery history for their webhooks |
+| Anyone | **Cannot** see webhook secrets |
+| User A | **Cannot** see User B's webhooks (query scoped by `userId`) |
+
+All queries include `userId: session.user.id` — there's no way to access another user's webhooks through the API.
+
+---
+
+## Fire-and-Forget Trigger Pattern (Webhook vs Realtime)
+
+### Two Fire-and-Forget Channels
+
+The main app now uses two fire-and-forget patterns after task mutations:
+
+```typescript
+// After creating a task:
+const task = await prisma.task.create({ data });
+emitToRealtime("task:created", task);        // Real-time WebSocket push
+triggerWebhook("task.created", task, userId); // Durable webhook queue
+return NextResponse.json(task, { status: 201 });
+```
+
+Both follow the same principle: the main app's response is NOT delayed by side-effect delivery. But the two services handle reliability differently.
+
+### Comparison
+
+| Aspect | Realtime (Socket.io) | Webhook (HTTP Delivery) |
+|--------|----------------------|-------------------------|
+| **Target** | Browser (internal users) | External systems (HTTP endpoints) |
+| **Delivery** | Instant (if connected) | Queued, then delivered by worker |
+| **Persistence** | None — if browser is offline, event is lost | Database — delivery survives service restart |
+| **Retry** | None (fire-and-forget broadcast) | 5 attempts with exponential backoff |
+| **Acknowledgment** | None (Socket.io fire-and-forget) | HTTP status code (200 = success) |
+| **Latency** | <100ms (direct WebSocket push) | 2s+ (polling interval + HTTP delivery) |
+| **Best for** | Live UI updates (transient) | System integration (durable) |
+
+### When Fire-and-Forget Is Appropriate
+
+Fire-and-forget means the caller doesn't wait for or verify the result. This is appropriate when:
+
+1. **The side effect is non-critical** — If it fails, the primary operation (task creation) still succeeded. The user's task is saved.
+2. **The service has its own reliability mechanism** — The webhook service persists deliveries in a database and retries. The realtime service auto-reconnects.
+3. **The latency cost of waiting is too high** — Blocking the user's request to wait for external HTTP delivery (potentially 10s timeout) is unacceptable.
+
+### When Fire-and-Forget Is NOT Appropriate
+
+Fire-and-forget would be **wrong** for:
+- Payment processing (must verify before responding)
+- Email verification links (must ensure delivery)
+- Database writes (the core operation itself)
+
+The task manager uses fire-and-forget only for **side effects after the primary operation succeeds** — never for the primary operation itself.
+
+### The Silent Catch Pattern
+
+Both helpers swallow errors:
+
+```typescript
+// src/lib/webhook.ts
+try {
+  await fetch(`${WEBHOOK_URL}/trigger`, { ... });
+} catch {
+  // Silent fail — webhook service handles retries independently
+}
+
+// src/lib/realtime.ts
+try {
+  await fetch(`${REALTIME_URL}/emit`, { ... });
+} catch {
+  // Silent fail — realtime is best-effort
+}
+```
+
+This is intentional. If the webhook service is down, the `fetch` throws, and the error is caught. The main app continues normally. The user's task is created/updated/deleted successfully — only the webhook delivery is skipped.
+
+### The Tradeoff: Simplicity vs Guaranteed Delivery
+
+This pattern accepts that some events may be lost:
+- If the webhook service is down when the task is created, the `/trigger` call fails silently
+- The event is NOT queued (it was never received)
+- The task is created without webhook delivery
+
+For a more robust system, you could:
+1. Write a local outbox table in the main app's database transaction
+2. Have a relay process read the outbox and forward to the webhook service
+3. This guarantees no events are lost, even if the webhook service is temporarily down
+
+But this adds significant complexity. For this project, the fire-and-forget tradeoff is acceptable — webhooks are a convenience feature, not a critical business requirement.
+
+---
+
+## Phase 3 Module 6 Key Patterns and Best Practices
+
+### Key Patterns:
+- **Webhook as event-driven HTTP callback** (main app notifies external systems)
+- **Database-as-queue** (WebhookDelivery table as durable job queue)
+- **Decoupled trigger/delivery** (main app queues instantly, worker delivers asynchronously)
+- **HMAC signature for payload verification** (crypto.createHmac with shared secret)
+- **Exponential backoff retry** (1s, 5s, 30s, 2m, 10m — configurable via ConfigMap)
+- **Dead letter queue** (failed deliveries persist for inspection, not retried)
+- **ConfigMap for tunable parameters** (retry config without image rebuild)
+- **`envFrom: configMapRef`** (bulk env var injection)
+- **Graceful shutdown with `terminationGracePeriodSeconds`** (finish in-flight work before exit)
+- **Secret auto-generation** (crypto.randomBytes on webhook creation)
+- **Secret stripping in API responses** (`secret: undefined`)
+- **Fire-and-forget trigger** (main app never blocked by webhook delivery)
+- **Zod validation for webhook registration** (URL format, event enum, min 1 event)
+- **Two fire-and-forget channels** (realtime = ephemeral, webhook = durable)
+
+### Best Practices:
+- Never return webhook secrets in API responses
+- Scope all webhook queries by `userId` (prevent cross-user access)
+- Use `AbortSignal.timeout()` on outbound HTTP to prevent hanging
+- Set `terminationGracePeriodSeconds` > worst-case shutdown time
+- Check `shuttingDown` flag inside worker loops (not just at the top)
+- Use database indexes on queue-polling columns (`status`, `nextRetryAt`)
+- Store full payload as `Json` in delivery records (self-contained, survives source deletion)
+- Use `take: N` batch limits to prevent memory spikes
+- Store operational config in ConfigMaps, secrets in Secrets
+- Use `envFrom` for bulk ConfigMap injection (simpler than individual `env` entries)
+- Strip Prisma's internal `_count` before returning JSON responses
+- Validate webhook events with Zod enums (prevent typos)
+- Use cascade deletes for cleanup (webhook → deliveries)
+- Log delivery failures with attempt count and next retry time
+- Log permanently failed deliveries at `error` level (dead letter)
+
+---
+
+## Phase 3 Module 6 Troubleshooting
+
+### Webhooks Not Being Delivered
+
+**Symptom**: Webhook registered, task created, but external URL never receives a POST.
+
+**Diagnosis**:
+```bash
+# 1. Check webhook service is running
+kubectl get pods -n task-manager -l app.kubernetes.io/component=webhook
+
+# 2. Check webhook service logs
+kubectl logs deployment/task-manager-webhook -n task-manager
+
+# 3. Check if WEBHOOK_URL is set on main app
+kubectl exec deployment/task-manager -n task-manager -- printenv WEBHOOK_URL
+
+# 4. Test /trigger endpoint directly
+kubectl exec deployment/task-manager -n task-manager -- node -e "fetch('http://task-manager-webhook:3003/trigger',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({event:'task.created',data:{id:'test',title:'Test'},userId:'test'})}).then(r=>r.json()).then(j=>console.log(j))"
+# Expected: {"queued":0} (0 because no webhooks for userId "test")
+```
+
+**Common causes**:
+- `webhook.enabled` is false in Helm values (service not deployed)
+- `WEBHOOK_URL` not set on main app deployment (conditional Helm block not rendered)
+- Webhook marked as `active: false` (filtered out by query)
+- Event name mismatch (webhook registered for `task.created` but trigger sends `task.created` — check spelling)
+
+### Deliveries Stuck in "pending"
+
+**Symptom**: Delivery records created but never transition to "delivered" or "failed".
+
+**Diagnosis**:
+```bash
+# Check webhook service logs for worker errors
+kubectl logs deployment/task-manager-webhook -n task-manager | grep -i "worker"
+
+# Check if the worker is running (should see "Background delivery worker started")
+kubectl logs deployment/task-manager-webhook -n task-manager | head -20
+```
+
+**Common causes**:
+- Background worker crashed (check for unhandled errors in logs)
+- `nextRetryAt` is set in the future (check the delivery record)
+- External URL is timing out (`DELIVERY_TIMEOUT_MS` = 10s per delivery — 10 pending = 100s before next poll)
+- Database connection issue (Prisma can't query pending deliveries)
+
+### All Deliveries Show "failed"
+
+**Symptom**: Every delivery exhausts 5 attempts and is marked "failed".
+
+**Diagnosis**:
+```bash
+# Check the response field on failed deliveries
+kubectl exec deployment/task-manager-webhook -n task-manager -- node -e "
+const { PrismaClient } = require('./src/generated/prisma/client.ts');
+// Or use the test script if available
+"
+
+# Alternatively, query via API:
+# GET /api/webhooks/[id] — check delivery history
+```
+
+**Common causes**:
+- External URL returns non-2xx status (check `statusCode` and `response` fields)
+- External URL is unreachable (DNS, firewall, wrong protocol)
+- External URL requires authentication not configured (401/403)
+- HMAC signature verification fails on the receiver side (receiver's secret doesn't match)
+- Payload format unexpected by receiver (check `Content-Type` header)
+
+### ConfigMap Values Not Applied
+
+**Symptom**: Changed retry intervals in Helm but webhook service uses old values.
+
+**Diagnosis**:
+```bash
+# Check ConfigMap
+kubectl get configmap task-manager-webhook-config -n task-manager -o yaml
+
+# Check env vars inside the pod
+kubectl exec deployment/task-manager-webhook -n task-manager -- printenv | grep -E "MAX_ATTEMPTS|BACKOFF"
+
+# Check startup log (configuration is logged on boot)
+kubectl logs deployment/task-manager-webhook -n task-manager | grep "Configuration loaded"
+```
+
+**Fix**: ConfigMap changes require a pod restart to take effect:
+```bash
+kubectl rollout restart deployment/task-manager-webhook -n task-manager
+```
+
+### HMAC Signature Verification Fails on Receiver
+
+**Symptom**: External service rejects webhooks with 401 Unauthorized.
+
+**Cause**: The receiver is computing HMAC differently than the sender.
+
+**Verification checklist**:
+1. **Same secret**: The receiver must use the exact secret from the database (not the API response, which strips it)
+2. **Same body**: The receiver must compute HMAC on the **raw request body**, not a re-serialized JSON object (key ordering, whitespace can differ)
+3. **Same algorithm**: Both must use HMAC-SHA256
+4. **Same format**: The header is `sha256=<hex>`, not just `<hex>`
+
+**Fix on the receiver side**:
+```javascript
+// Use raw body, not JSON-parsed-and-re-stringified
+const rawBody = req.rawBody;  // Express with raw body parser
+const expected = "sha256=" + crypto
+  .createHmac("sha256", secret)
+  .update(rawBody)
+  .digest("hex");
+
+// Use timing-safe comparison
+if (!crypto.timingSafeEqual(
+  Buffer.from(signature),
+  Buffer.from(expected)
+)) {
+  return res.status(401).send("Invalid signature");
+}
+```
+
+### Pod Takes Too Long to Terminate
+
+**Symptom**: `kubectl delete pod` hangs for 35 seconds before pod disappears.
+
+**Cause**: This is expected behavior — `terminationGracePeriodSeconds: 35` gives the worker time to finish in-flight deliveries. The pod won't terminate until the graceful shutdown handler completes or the grace period expires.
+
+**Fix**: This is by design. If faster termination is needed, reduce `terminationGracePeriodSeconds` (but ensure it's still > worst-case shutdown time).
+
+---
+
 ## What You've Learned in Stage 2 - Phase 3
 
 ### Technologies Mastered:
@@ -4767,6 +6072,12 @@ kubectl exec deployment/task-manager -n task-manager -- printenv REALTIME_URL
 - Kubernetes CronJob for batch reporting
 - API proxy pattern (auth-scoped service access)
 - `Promise.all` for parallel API calls
+- Node.js `crypto.createHmac` (HMAC-SHA256 payload signing)
+- Webhook HTTP callback pattern (event-driven external notifications)
+- Database-as-queue pattern (PostgreSQL table as durable job queue)
+- `AbortSignal.timeout` for outbound HTTP safety
+- Kubernetes ConfigMap (`envFrom: configMapRef` for bulk env injection)
+- `terminationGracePeriodSeconds` for background worker shutdown
 
 ### Core Concepts:
 - HTTP vs WebSocket (request/response vs persistent bidirectional)
@@ -4785,6 +6096,15 @@ kubectl exec deployment/task-manager -n task-manager -- printenv REALTIME_URL
 - Docker image reuse across workloads (server + CronJob)
 - API proxy as security boundary (user can't bypass auth)
 - Graceful degradation (all services are optional)
+- HMAC (Hash-based Message Authentication Code) for payload verification
+- Database-as-queue vs message broker (simplicity/durability vs throughput)
+- Exponential backoff with configurable intervals (1s → 5s → 30s → 2m → 10m)
+- Dead letter queue (permanently failed deliveries persist for inspection)
+- Decoupled trigger/delivery (instant queue vs async delivery)
+- ConfigMap vs Secret (non-sensitive vs sensitive configuration)
+- Graceful shutdown lifecycle (SIGTERM → finish in-flight → clean exit)
+- Ephemeral vs durable side effects (realtime broadcast vs webhook queue)
+- Two fire-and-forget channels (realtime for UI, webhook for system integration)
 
 ### Best Practices:
 - Use Socket.io rooms instead of manual client tracking
@@ -4802,6 +6122,16 @@ kubectl exec deployment/task-manager -n task-manager -- printenv REALTIME_URL
 - Proxy external service access through authenticated main app
 - Return `null` from widgets when backing service is unavailable
 - Check for service URLs before making internal calls
+- Never return secrets in API responses (strip with `secret: undefined`)
+- Auto-generate HMAC secrets (`crypto.randomBytes(32).toString("hex")`)
+- Use `AbortSignal.timeout()` on all outbound HTTP to prevent hanging
+- Store operational config in ConfigMaps for tuning without image rebuilds
+- Set `terminationGracePeriodSeconds` > worst-case shutdown time
+- Check `shuttingDown` flag inside worker loops (not just at the top)
+- Index queue-polling columns (`status`, `nextRetryAt`) for fast polls
+- Use `take: N` batch limits to prevent memory spikes
+- Validate webhook events with Zod enums (prevent typos)
+- Log permanently failed deliveries at `error` level (dead letters)
 
 ### Troubleshooting Skills:
 - Debugging WebSocket connection failures
@@ -4812,3 +6142,8 @@ kubectl exec deployment/task-manager -n task-manager -- printenv REALTIME_URL
 - Tracing event flow (main app → /emit → socket → browser)
 - Diagnosing NGINX WebSocket routing issues
 - Debugging Python service startup failures in Kubernetes
+- Diagnosing stuck webhook deliveries (pending → never delivered/failed)
+- Debugging HMAC signature verification failures (raw body, secret match)
+- Tracing webhook event flow (main app → /trigger → DB queue → worker → external URL)
+- Diagnosing ConfigMap values not applied (pod restart required)
+- Debugging background worker crashes (unhandled errors in poll loop)

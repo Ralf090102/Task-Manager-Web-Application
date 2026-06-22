@@ -494,6 +494,64 @@ Expanding the monolith into a microservices architecture. 8 planned modules acro
   # Expected: {"emitted":true,"event":"test:event","room":"board"}
   ```
 
+### Module 6: Webhook Delivery Service (Phase 3)
+
+- **Service**: `services/webhook/` — Node.js Fastify microservice with background delivery worker
+- **Purpose**: Delivers HTTP POST callbacks (webhooks) to user-registered URLs when tasks are created/updated/deleted
+- **Runtime**: `tsx` (same pattern as other services)
+- **Port**: 3003 (ClusterIP only — no Ingress, internal access only)
+- **Endpoints**: `GET /health`, `POST /trigger` (internal — main app pushes events)
+- **Background worker**: Infinite loop polling `WebhookDelivery` table for pending deliveries every 2s
+- **Retry logic**: Exponential backoff (1s, 5s, 30s, 2m, 10m), max 5 attempts, then marked as `failed` (dead letter)
+- **HMAC signing**: Each delivery includes `X-Webhook-Signature: sha256=<hex>` header (HMAC of body with webhook secret)
+- **ConfigMap**: Retry configuration stored in ConfigMap (`MAX_ATTEMPTS`, `BACKOFF_INTERVALS`, `POLL_INTERVAL_MS`, `DELIVERY_TIMEOUT_MS`) — no image rebuild needed to tune
+- **Graceful shutdown**: `SIGTERM`/`SIGINT` handler stops the background loop, waits for in-flight deliveries, closes Fastify + Prisma; `terminationGracePeriodSeconds: 35`
+- **Schema**: `Webhook` model (id, userId, url, events[], secret, active) and `WebhookDelivery` model (id, webhookId, event, payload, statusCode, response, attempts, maxAttempts, nextRetryAt, deliveredAt, status)
+- **Main app integration**:
+  - `src/lib/webhook.ts` — `triggerWebhook()` helper (fire-and-forget POST to `/trigger`)
+  - Task API routes emit webhook events after mutations (create/update/delete)
+  - `src/app/api/webhooks/route.ts` — GET list, POST create (auto-generates HMAC secret)
+  - `src/app/api/webhooks/[id]/route.ts` — GET detail (with delivery history), PATCH update, DELETE
+- **Helm templates**: `templates/webhook/` — Deployment, Service (ClusterIP), ConfigMap
+- **values.yaml**: `webhook:` section with `enabled`, `image`, `retry` (maxAttempts, intervals), `resources`
+- **Image**: `ralf090102/webhook-service:latest`
+- **Build context**: `task-manager/` (same as other services)
+- **Deploy commands**:
+  ```bash
+  # Build webhook image (from task-manager/, Docker Desktop)
+  docker build -t ralf090102/webhook-service:latest -f services/webhook/Dockerfile .
+  minikube image load ralf090102/webhook-service:latest
+
+  # Helm upgrade with webhook enabled
+  # NOTE: --reuse-values does NOT read new values.yaml keys!
+  # Must pass ALL webhook.* values via --set on first deploy:
+  helm upgrade task-manager ./task-manager/helm-chart --namespace task-manager \
+    --reuse-values \
+    --set webhook.enabled=true \
+    --set webhook.image.repository=ralf090102/webhook-service \
+    --set webhook.image.tag=latest \
+    --set webhook.image.pullPolicy=Never \
+    --set webhook.resources.limits.cpu=250m \
+    --set webhook.resources.limits.memory=256Mi \
+    --set webhook.resources.requests.cpu=100m \
+    --set webhook.resources.requests.memory=128Mi
+
+  # Subsequent upgrades only need --reuse-values:
+  helm upgrade task-manager ./task-manager/helm-chart --namespace task-manager --reuse-values
+
+  # Test health endpoint:
+  kubectl exec deployment/task-manager -n task-manager -- node -e "fetch('http://task-manager-webhook:3003/health').then(r=>r.json()).then(j=>console.log(j))"
+  # Expected: {"status":"ok"}
+
+  # Test /trigger endpoint (no webhooks registered → 0 queued):
+  kubectl exec deployment/task-manager -n task-manager -- node -e "fetch('http://task-manager-webhook:3003/trigger',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({event:'task.created',data:{id:'test',title:'Test'},userId:'test'})}).then(r=>r.json()).then(j=>console.log(j))"
+  # Expected: {"queued":0}
+
+  # Check ConfigMap:
+  kubectl get configmap task-manager-webhook-config -n task-manager -o yaml
+  # Expected: MAX_ATTEMPTS: "5", BACKOFF_INTERVALS: "1,5,30,120,600"
+  ```
+
 ### Service Selector Labels (Critical)
 
 The main app Deployment and Service MUST have `app.kubernetes.io/component: app` in their labels/selectors. Without it, the main app Service selector (`app.kubernetes.io/name=task-manager` + `app.kubernetes.io/instance=task-manager`) matches ALL pods with those base labels — including notification pods. This causes traffic to be load-balanced across both pods (Fastify returns 404 for Next.js routes like `/dashboard`).
@@ -507,6 +565,7 @@ The main app Deployment and Service MUST have `app.kubernetes.io/component: app`
 - Search sync: `app.kubernetes.io/component: search-sync`
 - Realtime: `app.kubernetes.io/component: realtime`
 - Analytics: `app.kubernetes.io/component: analytics`
+- Webhook: `app.kubernetes.io/component: webhook`
 - Scheduler: N/A (CronJob, no Service)
 
 ### Microservice Pattern (reusable for future services)
