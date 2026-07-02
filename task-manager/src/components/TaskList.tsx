@@ -26,6 +26,8 @@ export default function TaskList({ initialTasks }: TaskListProps) {
   const [filter, setFilter] = useState<FilterStatus>("ALL");
   const [showForm, setShowForm] = useState(false);
   const [live, setLive] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<Task[] | null>(null);
 
   const refreshTasks = useCallback(async () => {
     try {
@@ -38,6 +40,27 @@ export default function TaskList({ initialTasks }: TaskListProps) {
       /* ignore */
     }
   }, []);
+
+  useEffect(() => {
+    if (searchQuery.trim().length === 0) {
+      setSearchResults(null);
+      return;
+    }
+    const timer = setTimeout(async () => {
+      try {
+        const res = await fetch(
+          `/api/tasks/search?q=${encodeURIComponent(searchQuery.trim())}`
+        );
+        if (res.ok) {
+          const data = await res.json();
+          setSearchResults(data.hits || []);
+        }
+      } catch {
+        /* ignore */
+      }
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
 
   const refreshRef = useRef(refreshTasks);
 
@@ -121,6 +144,8 @@ export default function TaskList({ initialTasks }: TaskListProps) {
     COMPLETED: tasks.filter((t) => t.status === "COMPLETED").length,
   };
 
+  const displayedTasks = searchResults ?? filteredTasks;
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -149,44 +174,88 @@ export default function TaskList({ initialTasks }: TaskListProps) {
         </div>
       )}
 
-      <div className="flex gap-1 rounded-lg border border-zinc-200 bg-zinc-50 p-1 dark:border-zinc-800 dark:bg-zinc-900">
-        {(
-          [
-            ["ALL", "All"],
-            ["TODO", "To Do"],
-            ["IN_PROGRESS", "In Progress"],
-            ["COMPLETED", "Completed"],
-          ] as const
-        ).map(([value, label]) => (
+      <div className="relative">
+        <svg
+          className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400"
+          xmlns="http://www.w3.org/2000/svg"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <circle cx="11" cy="11" r="8" />
+          <path d="m21 21-4.3-4.3" />
+        </svg>
+        <input
+          type="text"
+          placeholder="Search tasks..."
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          className="w-full rounded-lg border border-zinc-200 bg-white py-2 pl-9 pr-9 text-sm text-zinc-900 placeholder-zinc-400 focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:placeholder-zinc-500"
+        />
+        {searchQuery && (
           <button
-            key={value}
-            onClick={() => setFilter(value)}
-            className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
-              filter === value
-                ? "bg-white text-zinc-900 shadow-sm dark:bg-zinc-800 dark:text-zinc-100"
-                : "text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200"
-            }`}
+            onClick={() => setSearchQuery("")}
+            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200"
           >
-            {label} ({statusCounts[value]})
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M18 6 6 18" />
+              <path d="m6 6 12 12" />
+            </svg>
           </button>
-        ))}
+        )}
       </div>
 
-      {tasks.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-zinc-300 py-12 text-center dark:border-zinc-700">
-          <p className="text-sm text-zinc-500 dark:text-zinc-400">
-            No tasks yet. Create your first task!
-          </p>
+      {!searchResults && (
+        <div className="flex gap-1 rounded-lg border border-zinc-200 bg-zinc-50 p-1 dark:border-zinc-800 dark:bg-zinc-900">
+          {(
+            [
+              ["ALL", "All"],
+              ["TODO", "To Do"],
+              ["IN_PROGRESS", "In Progress"],
+              ["COMPLETED", "Completed"],
+            ] as const
+          ).map(([value, label]) => (
+            <button
+              key={value}
+              onClick={() => setFilter(value)}
+              className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                filter === value
+                  ? "bg-white text-zinc-900 shadow-sm dark:bg-zinc-800 dark:text-zinc-100"
+                  : "text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200"
+              }`}
+            >
+              {label} ({statusCounts[value]})
+            </button>
+          ))}
         </div>
-      ) : filteredTasks.length === 0 ? (
+      )}
+
+      {displayedTasks.length === 0 ? (
         <div className="rounded-lg border border-dashed border-zinc-300 py-12 text-center dark:border-zinc-700">
           <p className="text-sm text-zinc-500 dark:text-zinc-400">
-            No tasks match this filter.
+            {searchResults
+              ? "No search results found."
+              : tasks.length === 0
+                ? "No tasks yet. Create your first task!"
+                : "No tasks match this filter."}
           </p>
         </div>
       ) : (
         <div className="grid gap-3">
-          {filteredTasks.map((task) => (
+          {displayedTasks.map((task) => (
             <TaskCard
               key={task.id}
               task={task}
