@@ -36,6 +36,14 @@ async function run() {
         data: { lastRun: now, nextRun },
       });
 
+      await prisma.notification.create({
+        data: {
+          userId: template.userId,
+          type: "recurring.triggered",
+          message: `Recurring task "${template.title}" just created a new task for you.`,
+        },
+      });
+
       console.log(
         `[scheduler] Created "${template.title}" for user ${template.userId}, next run: ${nextRun.toISOString()}`
       );

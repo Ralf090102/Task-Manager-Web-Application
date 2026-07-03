@@ -259,10 +259,10 @@ async function main() {
     }),
   ]);
   log("🔁", `Recurring tasks: ${recurringTasks.length} created`);
-  log("   ├─ ✅ " + "*/5 * * * * — every 5 min (ACTIVE)");
-  log("   ├─ ✅ " + "0 9 * * *   — daily 9 AM (ACTIVE)");
-  log("   ├─ ✅ " + "0 10 * * 1  — weekly Monday 10 AM (ACTIVE)");
-  log("   └─ ⏸  " + "0 0 * * *   — daily midnight (PAUSED)");
+  console.log("     ├─ ✅ */5 * * * * — every 5 min (ACTIVE)");
+  console.log("     ├─ ✅ 0 9 * * *   — daily 9 AM (ACTIVE)");
+  console.log("     ├─ ✅ 0 10 * * 1  — weekly Monday 10 AM (ACTIVE)");
+  console.log("     └─ ⏸  0 0 * * *   — daily midnight (PAUSED)");
 
   // 6. ── Webhooks ───────────────────────────────────────────────────────────
   // Use webhook.site URLs for real delivery testing

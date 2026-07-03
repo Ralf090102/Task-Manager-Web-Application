@@ -78,6 +78,17 @@ export async function PUT(
       },
     });
 
+    if (existing.status !== "COMPLETED" && task.status === "COMPLETED") {
+      await prisma.notification.create({
+        data: {
+          userId: session.user.id,
+          type: "task.completed",
+          message: `You completed "${task.title}". Nice work!`,
+          taskId: task.id,
+        },
+      });
+    }
+
     trackTaskOperation("update", "success");
     logger.info({ taskId: id, userId: session.user.id }, "Task updated");
     observeRequest("PUT", "/api/tasks/:id", 200, (Date.now() - start) / 1000);

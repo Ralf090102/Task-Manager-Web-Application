@@ -49,6 +49,7 @@ type DeliveryWithWebhook = {
     secret: string;
     events: string[];
     active: boolean;
+    userId: string;
   };
 }
 
@@ -152,6 +153,14 @@ async function deliver(delivery: DeliveryWithWebhook): Promise<void> {
         { deliveryId: delivery.id, attempts, err },
         "[webhook] Delivery permanently failed (dead letter)"
       );
+
+      await prisma.notification.create({
+        data: {
+          userId: delivery.webhook.userId,
+          type: "webhook.failed",
+          message: `Webhook delivery to ${delivery.webhook.url} permanently failed after ${MAX_ATTEMPTS} attempts.`,
+        },
+      });
     } else {
       app.log.warn(
         { deliveryId: delivery.id, attempts, nextRetryIn: backoffMs },

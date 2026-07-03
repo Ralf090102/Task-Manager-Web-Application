@@ -227,6 +227,15 @@ app.post("/teams/:id/invite", async (req) => {
 
   await createActivity(id, invitee.id, "MEMBER_JOINED");
 
+  const team = await prisma.team.findUnique({ where: { id }, select: { name: true } });
+  await prisma.notification.create({
+    data: {
+      userId: invitee.id,
+      type: "team.invited",
+      message: `You were invited to join "${team?.name ?? "a team"}".`,
+    },
+  });
+
   app.log.info(
     { teamId: id, inviteeId: invitee.id },
     "[team] Member invited"
@@ -311,6 +320,20 @@ app.post("/teams/:id/boards", async (req) => {
   });
 
   await createActivity(id, userId, "BOARD_CREATED", undefined, { boardName: name });
+
+  const teammates = await prisma.member.findMany({
+    where: { teamId: id, userId: { not: userId } },
+    select: { userId: true },
+  });
+  for (const m of teammates) {
+    await prisma.notification.create({
+      data: {
+        userId: m.userId,
+        type: "team.board_created",
+        message: `A new board "${name}" was created in your team.`,
+      },
+    });
+  }
 
   app.log.info({ teamId: id, boardId: board.id }, "[team] Board created");
   return board;
