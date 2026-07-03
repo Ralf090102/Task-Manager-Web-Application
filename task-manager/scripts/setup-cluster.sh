@@ -528,13 +528,23 @@ fi
 #   NextAuth v5 security setting for non-HTTPS environments.
 #   MUST use --set-string (not --set) because Helm parses "true" as a boolean,
 #   and b64enc in the secret template expects a string.
+#
+# --no-hooks
+#   Skips the db-migration pre-upgrade hook (team-service) which runs
+#   `prisma db push` against the Supabase pgbouncer URL (port 6543).
+#   The pgbouncer connection pooler doesn't support the DDL operations
+#   Prisma needs, causing it to hang indefinitely.
+#   Schema pushes should be done manually via the direct connection (port 5432):
+#     npx prisma db push --accept-data-loss
+#   (with DATABASE_URL pointing at port 5432, not 6543)
 
-write_info "Deploying Helm release '$APP_RELEASE' (upgrade --install)..."
+write_info "Deploying Helm release '$APP_RELEASE' (upgrade --install, --no-hooks)..."
 
 helm upgrade --install "$APP_RELEASE" \
     "${PROJECT_ROOT}/task-manager/helm-chart" \
     --namespace "$APP_NAMESPACE" \
     --create-namespace \
+    --no-hooks \
     --set image.pullPolicy=Never \
     --set "monitoring.enabled=${MONITORING_FLAG}" \
     --set monitoring.serviceMonitor.scrapeInterval=15s \

@@ -1,5 +1,8 @@
 node_modules
+**/node_modules
 .next
+**/.next
+**/src/generated
 .git
 .gitignore
 .env
@@ -10,3 +13,7 @@ src/generated
 Dockerfile
 docker-compose*.yml
 .dockerignore
+helm-chart
+scripts
+.swc
+**/*.log
