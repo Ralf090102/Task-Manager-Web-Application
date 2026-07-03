@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import TaskAttachments from "./TaskAttachments";
 
 interface Task {
   id: string;
@@ -146,6 +147,8 @@ export default function TaskCard({
           </span>
         )}
       </div>
+
+      <TaskAttachments taskId={task.id} />
     </div>
   );
 }
