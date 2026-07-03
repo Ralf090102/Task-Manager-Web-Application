@@ -31,12 +31,36 @@ const priorityColors: Record<string, string> = {
 export default function RecurringTaskList() {
   const [recurring, setRecurring] = useState<RecurringTask[]>([]);
   const [showForm, setShowForm] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [priority, setPriority] = useState("MEDIUM");
   const [cron, setCron] = useState("0 9 * * *");
   const [cronPreset, setCronPreset] = useState("Daily (9 AM)");
   const [error, setError] = useState("");
+
+  function resetForm() {
+    setEditingId(null);
+    setTitle("");
+    setDescription("");
+    setPriority("MEDIUM");
+    setCron("0 9 * * *");
+    setCronPreset("Daily (9 AM)");
+    setError("");
+    setShowForm(false);
+  }
+
+  function startEdit(rt: RecurringTask) {
+    setEditingId(rt.id);
+    setTitle(rt.title);
+    setDescription(rt.description || "");
+    setPriority(rt.priority);
+    setCron(rt.cron);
+    const matched = Object.entries(cronPresets).find(([, v]) => v === rt.cron);
+    setCronPreset(matched ? matched[0] : "custom");
+    setError("");
+    setShowForm(true);
+  }
 
   const fetchRecurring = useCallback(async () => {
     try {
@@ -60,14 +84,34 @@ export default function RecurringTaskList() {
     return () => { cancelled = true; };
   }, []);
 
-  async function handleCreate(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError("");
+
+    const payload = { title, description, priority, cron };
+
+    if (editingId) {
+      const res = await fetch(`/api/recurring/${editingId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        setError(data.error || "Failed to update recurring task");
+        return;
+      }
+
+      resetForm();
+      await fetchRecurring();
+      return;
+    }
 
     const res = await fetch("/api/recurring", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title, description, priority, cron }),
+      body: JSON.stringify(payload),
     });
 
     if (!res.ok) {
@@ -76,12 +120,7 @@ export default function RecurringTaskList() {
       return;
     }
 
-    setTitle("");
-    setDescription("");
-    setPriority("MEDIUM");
-    setCron("0 9 * * *");
-    setCronPreset("Daily (9 AM)");
-    setShowForm(false);
+    resetForm();
     await fetchRecurring();
   }
 
@@ -107,7 +146,7 @@ export default function RecurringTaskList() {
           Recurring Tasks
         </h2>
         <button
-          onClick={() => setShowForm(!showForm)}
+          onClick={() => { resetForm(); setShowForm(!showForm); }}
           className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-zinc-100 transition-colors hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
         >
           {showForm ? "Cancel" : "+ New Recurring Task"}
@@ -116,7 +155,7 @@ export default function RecurringTaskList() {
 
       {showForm && (
         <form
-          onSubmit={handleCreate}
+          onSubmit={handleSubmit}
           className="space-y-4 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900"
         >
           <div>
@@ -210,7 +249,7 @@ export default function RecurringTaskList() {
             type="submit"
             className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-zinc-100 transition-colors hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
           >
-            Create
+            {editingId ? "Save Changes" : "Create"}
           </button>
         </form>
       )}
@@ -259,6 +298,16 @@ export default function RecurringTaskList() {
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
+                  <button
+                    onClick={() => startEdit(rt)}
+                    className="rounded p-1 text-zinc-400 opacity-0 transition-opacity hover:text-blue-500 group-hover:opacity-100"
+                    title="Edit"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M12 20h9" />
+                      <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+                    </svg>
+                  </button>
                   <button
                     onClick={() => handleToggle(rt.id, rt.active)}
                     className="rounded p-1 text-zinc-400 transition-colors hover:text-zinc-600 dark:hover:text-zinc-200"
