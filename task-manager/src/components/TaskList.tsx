@@ -42,16 +42,14 @@ export default function TaskList({ initialTasks }: TaskListProps) {
   }, []);
 
   useEffect(() => {
-    if (searchQuery.trim().length === 0) {
-      setSearchResults(null);
-      return;
-    }
+    if (searchQuery.trim().length === 0) return;
+    let cancelled = false;
     const timer = setTimeout(async () => {
       try {
         const res = await fetch(
           `/api/tasks/search?q=${encodeURIComponent(searchQuery.trim())}`
         );
-        if (res.ok) {
+        if (res.ok && !cancelled) {
           const data = await res.json();
           setSearchResults(data.hits || []);
         }
@@ -59,7 +57,10 @@ export default function TaskList({ initialTasks }: TaskListProps) {
         /* ignore */
       }
     }, 300);
-    return () => clearTimeout(timer);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, [searchQuery]);
 
   const refreshRef = useRef(refreshTasks);
@@ -144,7 +145,8 @@ export default function TaskList({ initialTasks }: TaskListProps) {
     COMPLETED: tasks.filter((t) => t.status === "COMPLETED").length,
   };
 
-  const displayedTasks = searchResults ?? filteredTasks;
+  const isSearching = searchQuery.trim().length > 0;
+  const displayedTasks = isSearching ? (searchResults ?? []) : filteredTasks;
 
   return (
     <div className="space-y-6">

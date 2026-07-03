@@ -69,6 +69,10 @@ spec:
             - name: TEAM_SERVICE_URL
               value: "http://{{ include "task-manager.fullname" . }}-team-service:3002"
             {{- end }}
+            {{- if .Values.fileService.enabled }}
+            - name: FILE_SERVICE_URL
+              value: "http://{{ include "task-manager.fullname" . }}-file-service:3005"
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /

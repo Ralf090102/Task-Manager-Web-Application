@@ -29,17 +29,25 @@ export default function TaskAttachments({ taskId }: TaskAttachmentsProps) {
   const fetchAttachments = useCallback(async () => {
     try {
       const res = await fetch(`/api/attachments?taskId=${taskId}`);
-      if (res.ok) {
-        setAttachments(await res.json());
-      }
+      if (res.ok) setAttachments(await res.json());
     } catch {
       /* ignore */
     }
   }, [taskId]);
 
   useEffect(() => {
-    if (expanded) fetchAttachments();
-  }, [expanded, fetchAttachments]);
+    if (!expanded) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/attachments?taskId=${taskId}`);
+        if (res.ok && !cancelled) setAttachments(await res.json());
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [expanded, taskId]);
 
   async function handleUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];

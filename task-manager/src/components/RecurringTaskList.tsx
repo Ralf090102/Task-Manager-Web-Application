@@ -48,8 +48,17 @@ export default function RecurringTaskList() {
   }, []);
 
   useEffect(() => {
-    fetchRecurring();
-  }, [fetchRecurring]);
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/recurring");
+        if (res.ok && !cancelled) setRecurring(await res.json());
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();

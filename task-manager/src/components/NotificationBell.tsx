@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef } from "react";
 
 interface Notification {
   id: string;
@@ -19,22 +19,25 @@ export default function NotificationBell() {
 
   const unreadCount = notifications.filter((n) => !n.read).length;
 
-  const fetchNotifications = useCallback(async () => {
-    try {
-      const res = await fetch("/api/notifications");
-      if (res.ok) {
-        setNotifications(await res.json());
-      }
-    } catch {
-      /* ignore */
-    }
-  }, []);
-
   useEffect(() => {
-    fetchNotifications();
-    const interval = setInterval(fetchNotifications, 30000);
-    return () => clearInterval(interval);
-  }, [fetchNotifications]);
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const res = await fetch("/api/notifications");
+        if (res.ok && !cancelled) {
+          setNotifications(await res.json());
+        }
+      } catch {
+        /* ignore */
+      }
+    };
+    load();
+    const interval = setInterval(load, 30000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
 
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {

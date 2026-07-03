@@ -50,8 +50,17 @@ export default function WebhookManager() {
   }, []);
 
   useEffect(() => {
-    fetchWebhooks();
-  }, [fetchWebhooks]);
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/webhooks");
+        if (res.ok && !cancelled) setWebhooks(await res.json());
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
