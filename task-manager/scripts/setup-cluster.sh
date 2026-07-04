@@ -677,10 +677,19 @@ fi
 write_ok "notification pod is running"
 
 # Verify the notification service is reachable internally.
+# Retry up to 5 times with 3s sleep — Fastify needs a few seconds to start
+# listening even after the readiness probe passes.
 # Uses Node.js fetch() because the slim Next.js image has no curl/wget.
 write_info "Testing notification service health endpoint..."
-NOTIF_HEALTH=$(kubectl exec -n "$APP_NAMESPACE" deployment/"$APP_RELEASE" \
-    -- node -e "fetch('http://${APP_RELEASE}-notification:3004/health').then(r=>r.text()).then(t=>console.log(t))" 2>/dev/null || echo "")
+NOTIF_HEALTH=""
+for i in 1 2 3 4 5; do
+    NOTIF_HEALTH=$(kubectl exec -n "$APP_NAMESPACE" deployment/"$APP_RELEASE" \
+        -- node -e "fetch('http://${APP_RELEASE}-notification:3004/health').then(r=>r.text()).then(t=>console.log(t))" 2>/dev/null || echo "")
+    if echo "$NOTIF_HEALTH" | grep -q "ok"; then
+        break
+    fi
+    sleep 3
+done
 
 if echo "$NOTIF_HEALTH" | grep -q "ok"; then
     write_ok "Notification service is healthy"
@@ -933,15 +942,28 @@ fi
 # Wait for Prometheus pod only when monitoring is active.
 # Skipped with --skip-monitoring to save time.
 if [[ "$SKIP_MONITORING" != true ]]; then
-    # Wait for all monitoring pods to be Running.
-    # Prometheus is the critical one — the operator and Grafana depend on it.
-    # This wait runs regardless of whether we just installed or already had it,
-    # to ensure Prometheus is ready before Step 8 tries to create a ServiceMonitor.
+    # The Prometheus Operator creates the Prometheus StatefulSet pod
+    # asynchronously after the Helm install. If we run `kubectl wait` before
+    # the pod exists, it fails instantly ("no matching resources").
+    # So we first poll until the pod appears, THEN wait for ready.
+    write_info "Waiting for Prometheus Operator to create pod..."
+    PROM_RETRY=0
+    while ! kubectl get pods -n "$MONITORING_NAMESPACE" \
+            -l app.kubernetes.io/name=prometheus --no-headers 2>/dev/null | grep -q .; do
+        PROM_RETRY=$((PROM_RETRY + 1))
+        if [[ $PROM_RETRY -ge 60 ]]; then
+            write_err "Prometheus pod was never created by the operator"
+            write_info "Check: kubectl get pods -n $MONITORING_NAMESPACE"
+            exit 1
+        fi
+        sleep 5
+    done
+
     write_info "Waiting for Prometheus pod to be ready..."
     kubectl wait --namespace "$MONITORING_NAMESPACE" \
         --for=condition=ready pod \
         --selector=app.kubernetes.io/name=prometheus \
-        --timeout=300s >/dev/null 2>&1
+        --timeout=600s >/dev/null 2>&1
 
     if [[ $? -ne 0 ]]; then
         write_err "Prometheus pod did not become ready in time"
