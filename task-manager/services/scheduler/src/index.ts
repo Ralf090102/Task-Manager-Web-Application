@@ -23,6 +23,7 @@ async function run() {
           priority: template.priority,
           status: "TODO",
           userId: template.userId,
+          recurringTaskId: template.id,
         },
       });
 

@@ -19,6 +19,7 @@ export async function GET() {
     const tasks = await prisma.task.findMany({
       where: { userId: session.user.id },
       orderBy: { createdAt: "desc" },
+      include: { board: { select: { id: true, name: true, color: true } } },
     });
 
     trackTaskOperation("list", "success");
@@ -54,7 +55,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const { title, description, status, priority, dueDate } = parsed.data;
+    const { title, description, status, priority, dueDate, boardId } = parsed.data;
 
     const task = await prisma.task.create({
       data: {
@@ -64,6 +65,7 @@ export async function POST(req: Request) {
         priority: priority || "MEDIUM",
         dueDate: dueDate ? new Date(dueDate) : null,
         userId: session.user.id,
+        boardId: boardId || null,
       },
     });
 

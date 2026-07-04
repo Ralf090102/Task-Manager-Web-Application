@@ -114,6 +114,8 @@ model Task {
   board       Board?       @relation(fields: [boardId], references: [id], onDelete: SetNull)
   assigneeId  String?
   assignee    User?        @relation("TaskAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  recurringTaskId    String?
+  recurringTask      RecurringTask? @relation(fields: [recurringTaskId], references: [id], onDelete: SetNull)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -150,6 +152,7 @@ model RecurringTask {
   nextRun     DateTime
   lastRun     DateTime?
   active      Boolean      @default(true)
+  tasks       Task[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

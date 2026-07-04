@@ -264,6 +264,17 @@ async function main() {
   console.log("     ├─ ✅ 0 10 * * 1  — weekly Monday 10 AM (ACTIVE)");
   console.log("     └─ ⏸  0 0 * * *   — daily midnight (PAUSED)");
 
+  // Link some tasks to recurring templates (simulates scheduler-created tasks)
+  await prisma.task.update({
+    where: { id: tasks[6].id },
+    data: { recurringTaskId: recurringTasks[1].id },
+  });
+  await prisma.task.update({
+    where: { id: tasks[7].id },
+    data: { recurringTaskId: recurringTasks[1].id },
+  });
+  log("🔁", `2 tasks linked to recurring template "Daily standup reminder"`);
+
   // 6. ── Webhooks ───────────────────────────────────────────────────────────
   // Use webhook.site URLs for real delivery testing
   const webhooks = await Promise.all([
@@ -442,7 +453,7 @@ async function main() {
   console.log("  │  Login:    shampoo01@gmail.com               │");
   console.log("  │  Password: junnaruse                         │");
   console.log("  ├──────────────────────────────────────────────┤");
-  console.log("  │  1 User    8 Tasks     1 Team   3 Boards     │");
+  console.log("  │  1 User    8 Tasks (2 recurring) 1 Team   3 Boards │");
   console.log("  │  4 Recurring  3 Webhooks  5 Notifications    │");
   console.log("  │  3 Deliveries  6 Activities                  │");
   console.log("  └──────────────────────────────────────────────┘\n");

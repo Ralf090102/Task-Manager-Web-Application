@@ -3,6 +3,12 @@
 import { useState } from "react";
 import TaskAttachments from "./TaskAttachments";
 
+interface BoardInfo {
+  id: string;
+  name: string;
+  color: string;
+}
+
 interface Task {
   id: string;
   title: string;
@@ -11,6 +17,8 @@ interface Task {
   priority: string;
   dueDate: string | null;
   createdAt: string;
+  recurringTaskId?: string | null;
+  board?: BoardInfo | null;
 }
 
 interface TaskCardProps {
@@ -123,7 +131,7 @@ export default function TaskCard({
             {task.description}
           </p>
         )}
-        <div className="mt-2 flex items-center gap-2">
+        <div className="mt-2 flex flex-wrap items-center gap-2">
           <span
             className={`rounded px-1.5 py-0.5 text-xs font-medium ${
               priorityBadges[task.priority] || priorityBadges.LOW
@@ -141,6 +149,20 @@ export default function TaskCard({
             >
               {isOverdue && "\u26A0 "}
               {new Date(task.dueDate).toLocaleDateString()}
+            </span>
+          )}
+          {task.recurringTaskId && (
+            <span className="text-xs text-purple-500 dark:text-purple-400" title="Created from recurring template">
+              {"\u21BB"}
+            </span>
+          )}
+          {task.board && (
+            <span className="flex items-center gap-1 rounded bg-zinc-100 px-1.5 py-0.5 text-xs font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+              <span
+                className="h-2 w-2 rounded-full"
+                style={{ backgroundColor: task.board.color }}
+              />
+              {task.board.name}
             </span>
           )}
         </div>
@@ -227,6 +249,25 @@ export default function TaskCard({
           >
             {isOverdue && "Overdue: "}
             {new Date(task.dueDate).toLocaleDateString()}
+          </span>
+        )}
+
+        {task.recurringTaskId && (
+          <span
+            className="flex items-center gap-0.5 text-xs text-purple-500 dark:text-purple-400"
+            title="Created from recurring template"
+          >
+            {"\u21BB"} Recurring
+          </span>
+        )}
+
+        {task.board && (
+          <span className="flex items-center gap-1 rounded bg-zinc-100 px-1.5 py-0.5 text-xs font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+            <span
+              className="h-2 w-2 rounded-full"
+              style={{ backgroundColor: task.board.color }}
+            />
+            {task.board.name}
           </span>
         )}
       </div>

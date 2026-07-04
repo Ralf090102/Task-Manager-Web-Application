@@ -17,6 +17,7 @@ export const taskCreateSchema = z.object({
   status: z.enum(["TODO", "IN_PROGRESS", "COMPLETED"]).optional(),
   priority: z.enum(["LOW", "MEDIUM", "HIGH"]).optional(),
   dueDate: z.string().optional(),
+  boardId: z.string().nullable().optional(),
 });
 
 export const taskUpdateSchema = z.object({
@@ -25,6 +26,7 @@ export const taskUpdateSchema = z.object({
   status: z.enum(["TODO", "IN_PROGRESS", "COMPLETED"]).optional(),
   priority: z.enum(["LOW", "MEDIUM", "HIGH"]).optional(),
   dueDate: z.string().nullable().optional(),
+  boardId: z.string().nullable().optional(),
 });
 
 export const recurringTaskCreateSchema = z.object({

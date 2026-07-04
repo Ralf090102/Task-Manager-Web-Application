@@ -5,6 +5,19 @@ import { io } from "socket.io-client";
 import TaskCard from "./TaskCard";
 import TaskForm from "./TaskForm";
 
+interface TaskBoardInfo {
+  id: string;
+  name: string;
+  color: string;
+}
+
+interface BoardOption {
+  id: string;
+  name: string;
+  color: string;
+  teamName: string;
+}
+
 interface Task {
   id: string;
   title: string;
@@ -13,6 +26,8 @@ interface Task {
   priority: string;
   dueDate: string | null;
   createdAt: string;
+  recurringTaskId?: string | null;
+  board?: TaskBoardInfo | null;
 }
 
 const COLUMNS = [
@@ -38,9 +53,10 @@ const COLUMNS = [
 
 interface TaskListProps {
   initialTasks: Task[];
+  boards?: BoardOption[];
 }
 
-export default function TaskList({ initialTasks }: TaskListProps) {
+export default function TaskList({ initialTasks, boards = [] }: TaskListProps) {
   const [tasks, setTasks] = useState<Task[]>(initialTasks);
   const [showForm, setShowForm] = useState(false);
   const [live, setLive] = useState(false);
@@ -123,6 +139,7 @@ export default function TaskList({ initialTasks }: TaskListProps) {
     description?: string;
     priority?: string;
     dueDate?: string;
+    boardId?: string | null;
   }) {
     const res = await fetch("/api/tasks", {
       method: "POST",
@@ -220,7 +237,7 @@ export default function TaskList({ initialTasks }: TaskListProps) {
       {/* New task form */}
       {showForm && (
         <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-          <TaskForm onSubmit={handleCreate} />
+          <TaskForm onSubmit={handleCreate} boards={boards} />
         </div>
       )}
 

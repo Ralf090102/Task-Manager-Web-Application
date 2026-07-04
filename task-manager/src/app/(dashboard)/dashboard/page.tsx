@@ -9,15 +9,30 @@ export default async function DashboardPage() {
   const session = await auth();
   if (!session?.user?.id) redirect("/login");
 
-  const tasks = await prisma.task.findMany({
-    where: { userId: session.user.id },
-    orderBy: { createdAt: "desc" },
-  });
+  const [tasks, boards] = await Promise.all([
+    prisma.task.findMany({
+      where: { userId: session.user.id },
+      orderBy: { createdAt: "desc" },
+      include: { board: { select: { id: true, name: true, color: true } } },
+    }),
+    prisma.board.findMany({
+      where: { team: { members: { some: { userId: session.user.id } } } },
+      include: { team: { select: { name: true } } },
+      orderBy: { createdAt: "asc" },
+    }),
+  ]);
 
-  const serialized = tasks.map((t) => ({
+  const serializedTasks = tasks.map((t) => ({
     ...t,
     dueDate: t.dueDate?.toISOString() ?? null,
     createdAt: t.createdAt.toISOString(),
+  }));
+
+  const serializedBoards = boards.map((b) => ({
+    id: b.id,
+    name: b.name,
+    color: b.color,
+    teamName: b.team.name,
   }));
 
   return (
@@ -27,7 +42,7 @@ export default async function DashboardPage() {
         <div className="mb-6">
           <StatsWidget />
         </div>
-        <TaskList initialTasks={serialized} />
+        <TaskList initialTasks={serializedTasks} boards={serializedBoards} />
       </main>
     </>
   );

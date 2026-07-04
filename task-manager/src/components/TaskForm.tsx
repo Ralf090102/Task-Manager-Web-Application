@@ -2,25 +2,36 @@
 
 import { useState } from "react";
 
+interface BoardOption {
+  id: string;
+  name: string;
+  color: string;
+  teamName: string;
+}
+
 interface TaskFormProps {
   onSubmit: (data: {
     title: string;
     description?: string;
     priority?: string;
     dueDate?: string;
+    boardId?: string | null;
   }) => Promise<void>;
   initialData?: {
     title: string;
     description?: string;
     priority?: string;
     dueDate?: string;
+    boardId?: string | null;
   };
+  boards?: BoardOption[];
   submitLabel?: string;
 }
 
 export default function TaskForm({
   onSubmit,
   initialData,
+  boards = [],
   submitLabel = "Create Task",
 }: TaskFormProps) {
   const [title, setTitle] = useState(initialData?.title ?? "");
@@ -29,6 +40,7 @@ export default function TaskForm({
   );
   const [priority, setPriority] = useState(initialData?.priority ?? "MEDIUM");
   const [dueDate, setDueDate] = useState(initialData?.dueDate ?? "");
+  const [boardId, setBoardId] = useState(initialData?.boardId ?? "");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -43,12 +55,14 @@ export default function TaskForm({
         description: description || undefined,
         priority,
         dueDate: dueDate || undefined,
+        boardId: boardId || null,
       });
       if (!initialData) {
         setTitle("");
         setDescription("");
         setPriority("MEDIUM");
         setDueDate("");
+        setBoardId("");
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
@@ -138,6 +152,30 @@ export default function TaskForm({
           />
         </div>
       </div>
+
+      {boards.length > 0 && (
+        <div>
+          <label
+            htmlFor="board"
+            className="mb-1 block text-sm font-medium text-zinc-700 dark:text-zinc-300"
+          >
+            Board <span className="text-zinc-400">(optional)</span>
+          </label>
+          <select
+            id="board"
+            value={boardId}
+            onChange={(e) => setBoardId(e.target.value)}
+            className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-zinc-500 focus:outline-none focus:ring-1 focus:ring-zinc-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+          >
+            <option value="">No board</option>
+            {boards.map((b) => (
+              <option key={b.id} value={b.id}>
+                {b.name} ({b.teamName})
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
 
       <button
         type="submit"
