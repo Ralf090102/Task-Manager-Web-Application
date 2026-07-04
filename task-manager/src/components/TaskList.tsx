@@ -15,7 +15,26 @@ interface Task {
   createdAt: string;
 }
 
-type FilterStatus = "ALL" | "TODO" | "IN_PROGRESS" | "COMPLETED";
+const COLUMNS = [
+  {
+    key: "TODO",
+    label: "To Do",
+    accent: "border-t-zinc-400",
+    bg: "bg-zinc-50 dark:bg-zinc-900/50",
+  },
+  {
+    key: "IN_PROGRESS",
+    label: "In Progress",
+    accent: "border-t-blue-500",
+    bg: "bg-blue-50/50 dark:bg-blue-950/20",
+  },
+  {
+    key: "COMPLETED",
+    label: "Completed",
+    accent: "border-t-green-500",
+    bg: "bg-green-50/50 dark:bg-green-950/20",
+  },
+] as const;
 
 interface TaskListProps {
   initialTasks: Task[];
@@ -23,11 +42,13 @@ interface TaskListProps {
 
 export default function TaskList({ initialTasks }: TaskListProps) {
   const [tasks, setTasks] = useState<Task[]>(initialTasks);
-  const [filter, setFilter] = useState<FilterStatus>("ALL");
   const [showForm, setShowForm] = useState(false);
   const [live, setLive] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<Task[] | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [draggedId, setDraggedId] = useState<string | null>(null);
+  const [dragOverCol, setDragOverCol] = useState<string | null>(null);
 
   const refreshTasks = useCallback(async () => {
     try {
@@ -132,24 +153,50 @@ export default function TaskList({ initialTasks }: TaskListProps) {
   async function handleDelete(id: string) {
     const res = await fetch(`/api/tasks/${id}`, { method: "DELETE" });
     if (!res.ok) throw new Error("Failed to delete task");
+    setExpandedId(null);
     await refreshTasks();
   }
 
-  const filteredTasks =
-    filter === "ALL" ? tasks : tasks.filter((t) => t.status === filter);
-
-  const statusCounts = {
-    ALL: tasks.length,
-    TODO: tasks.filter((t) => t.status === "TODO").length,
-    IN_PROGRESS: tasks.filter((t) => t.status === "IN_PROGRESS").length,
-    COMPLETED: tasks.filter((t) => t.status === "COMPLETED").length,
-  };
-
   const isSearching = searchQuery.trim().length > 0;
-  const displayedTasks = isSearching ? (searchResults ?? []) : filteredTasks;
+  const activeTasks = isSearching ? (searchResults ?? []) : tasks;
+
+  const tasksByStatus = (status: string) =>
+    activeTasks.filter((t) => t.status === status);
+
+  async function handleDrop(status: string) {
+    if (!draggedId) return;
+    const task = tasks.find((t) => t.id === draggedId);
+    if (!task || task.status === status) {
+      setDraggedId(null);
+      setDragOverCol(null);
+      return;
+    }
+
+    setTasks((prev) =>
+      prev.map((t) => (t.id === draggedId ? { ...t, status } : t))
+    );
+    setDraggedId(null);
+    setDragOverCol(null);
+
+    try {
+      await fetch(`/api/tasks/${draggedId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status }),
+      });
+    } catch {
+      setTasks((prev) =>
+        prev.map((t) =>
+          t.id === task.id ? { ...t, status: task.status } : t
+        )
+      );
+    }
+    await refreshTasks();
+  }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
+      {/* Header row */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <h2 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">
@@ -170,12 +217,14 @@ export default function TaskList({ initialTasks }: TaskListProps) {
         </button>
       </div>
 
+      {/* New task form */}
       {showForm && (
         <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
           <TaskForm onSubmit={handleCreate} />
         </div>
       )}
 
+      {/* Search bar */}
       <div className="relative">
         <svg
           className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400"
@@ -220,51 +269,97 @@ export default function TaskList({ initialTasks }: TaskListProps) {
         )}
       </div>
 
-      {!searchResults && (
-        <div className="flex gap-1 rounded-lg border border-zinc-200 bg-zinc-50 p-1 dark:border-zinc-800 dark:bg-zinc-900">
-          {(
-            [
-              ["ALL", "All"],
-              ["TODO", "To Do"],
-              ["IN_PROGRESS", "In Progress"],
-              ["COMPLETED", "Completed"],
-            ] as const
-          ).map(([value, label]) => (
-            <button
-              key={value}
-              onClick={() => setFilter(value)}
-              className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
-                filter === value
-                  ? "bg-white text-zinc-900 shadow-sm dark:bg-zinc-800 dark:text-zinc-100"
-                  : "text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200"
+      {/* Kanban board */}
+      <div className="grid gap-4 md:grid-cols-3">
+        {COLUMNS.map((col) => {
+          const colTasks = tasksByStatus(col.key);
+          return (
+            <div
+              key={col.key}
+              className={`flex max-h-[calc(100vh-22rem)] flex-col rounded-lg border-t-2 ${col.accent} ${col.bg} transition-colors ${
+                dragOverCol === col.key ? "ring-2 ring-blue-400" : ""
               }`}
+              onDragOver={(e) => {
+                e.preventDefault();
+                setDragOverCol(col.key);
+              }}
+              onDragLeave={() => {
+                if (dragOverCol === col.key) setDragOverCol(null);
+              }}
+              onDrop={() => handleDrop(col.key)}
             >
-              {label} ({statusCounts[value]})
-            </button>
-          ))}
-        </div>
-      )}
+              {/* Column header */}
+              <div className="flex items-center justify-between px-3 py-2">
+                <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">
+                  {col.label}
+                </h3>
+                <span className="rounded-full bg-zinc-200 px-2 py-0.5 text-xs font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
+                  {colTasks.length}
+                </span>
+              </div>
 
-      {displayedTasks.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-zinc-300 py-12 text-center dark:border-zinc-700">
+              {/* Scrollable card list */}
+              <div className="flex-1 space-y-2 overflow-y-auto px-2 pb-2">
+                {colTasks.map((task) =>
+                  expandedId === task.id ? (
+                    <div
+                      key={task.id}
+                      className="rounded-md border-2 border-blue-400 bg-white dark:bg-zinc-900"
+                    >
+                      <div className="mb-1 flex items-center justify-between px-2 pt-1.5">
+                        <span className="text-xs font-medium text-blue-500">
+                          Expanded
+                        </span>
+                        <button
+                          onClick={() => setExpandedId(null)}
+                          className="text-xs text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200"
+                        >
+                          Collapse
+                        </button>
+                      </div>
+                      <TaskCard
+                        task={task}
+                        onStatusChange={handleStatusChange}
+                        onDelete={handleDelete}
+                      />
+                    </div>
+                  ) : (
+                    <TaskCard
+                      key={task.id}
+                      task={task}
+                      onStatusChange={handleStatusChange}
+                      onDelete={handleDelete}
+                      compact
+                      onExpand={() => setExpandedId(task.id)}
+                      draggable
+                      onDragStart={() => setDraggedId(task.id)}
+                      onDragEnd={() => {
+                        setDraggedId(null);
+                        setDragOverCol(null);
+                      }}
+                      isDragging={draggedId === task.id}
+                    />
+                  )
+                )}
+
+                {colTasks.length === 0 && (
+                  <p className="py-6 text-center text-xs text-zinc-400">
+                    {isSearching
+                      ? "No results"
+                      : "Drop tasks here"}
+                  </p>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {activeTasks.length === 0 && !isSearching && tasks.length > 0 && (
+        <div className="rounded-lg border border-dashed border-zinc-300 py-8 text-center dark:border-zinc-700">
           <p className="text-sm text-zinc-500 dark:text-zinc-400">
-            {searchResults
-              ? "No search results found."
-              : tasks.length === 0
-                ? "No tasks yet. Create your first task!"
-                : "No tasks match this filter."}
+            No tasks match this filter.
           </p>
-        </div>
-      ) : (
-        <div className="grid gap-3">
-          {displayedTasks.map((task) => (
-            <TaskCard
-              key={task.id}
-              task={task}
-              onStatusChange={handleStatusChange}
-              onDelete={handleDelete}
-            />
-          ))}
         </div>
       )}
     </div>
