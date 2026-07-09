@@ -53,6 +53,7 @@ model User {
   memberships    Member[]
   assignedTasks  Task[]    @relation("TaskAssignee")
   activities     Activity[]
+  welcomeShown   Boolean   @default(false)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

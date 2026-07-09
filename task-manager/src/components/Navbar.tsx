@@ -48,9 +48,13 @@ export default function Navbar() {
           ) : session ? (
             <>
               <NotificationBell />
-              <span className="text-sm text-zinc-600 dark:text-zinc-400">
+              <Link
+                href="/profile"
+                className="text-sm font-medium text-zinc-600 transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
+              >
                 {session.user?.name || session.user?.email}
-              </span>
+              </Link>
+              
               <button
                 onClick={() => signOut({ callbackUrl: "/login" })}
                 className="rounded-md px-3 py-1.5 text-sm font-medium text-zinc-600 transition-colors hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
