@@ -662,22 +662,378 @@ kubectl argo rollouts abort task-manager -n task-manager
 
 ---
 
-## Recommended Implementation Order
+## Optimal Implementation Strategy
+
+### The Dependency Graph (Why Order Matters)
+
+Some modules are independent and can be done in any order. Others have hard dependencies — doing them out of order means rebuilding work later.
 
 ```
-Module A (Loki)         ← Quickest win, directly enhances logging
-    ↓
-Module B (Redis)        ← Foundation for Module C
-    ↓
-Module C (Worker)       ← Queue-based processing, Helm subcharts
-    ↓
-Module D (Alerting)     ← Builds on existing Prometheus metrics
-    ↓
-Module E (Autoscaling)  ← Requires custom metrics from Prometheus
-    ↓
-Module F (GitOps)       ← Changes deployment workflow
-    ↓
-Module G (Canary)       ← Most advanced, requires GitOps + metrics
+Module A (Loki)          ──── independent (just install, no code changes)
+     │
+     │  (no dependency, but log aggregation helps debug everything after it)
+     ▼
+Module B (Redis)         ──── independent, BUT required by Module C
+     │
+     ▼
+Module C (Worker)        ──── HARD DEPENDENCY: needs Redis from Module B
+     │                      (BullMQ stores jobs in Redis)
+     │
+     │
+Module D (Alerting)      ──── independent (just needs Prometheus, already running)
+     │                      (but more valuable after you have more services to monitor)
+     │
+     │
+Module F (GitOps)        ──── independent, BUT should come BEFORE E and G
+     │                      (ArgoCD manages your Helm chart — you want this
+     │                       automated before adding HPA and Rollouts to the chart)
+     │
+     ▼
+Module E (Autoscaling)   ──── SOFT DEPENDENCY: benefits from GitOps (Module F)
+     │                      (HPA is a Helm template — easier to manage via ArgoCD)
+     │                      (also benefits from Module D alerts — you want to know
+     │                       when autoscaling fails)
+     │
+     ▼
+Module G (Canary)        ──── HARD DEPENDENCY: needs GitOps (Module F)
+                                (Rollout replaces Deployment in Helm chart)
+                                (needs Prometheus metrics for analysis — Module D)
+                                (needs ArgoCD for Rollout CRD management — Module F)
+```
+
+### Why the Recommended Order Is Different from Naive A-G
+
+The document lists modules A-G alphabetically. Here's why the *actual* optimal order rearranges them:
+
+```
+Naive order (A→G):            Optimal order (why):
+──────────────────            ───────────────────
+
+A (Loki)                      A (Loki)          ← First: helps you debug everything else
+B (Redis)                     D (Alerting)      ← Second: zero code changes, instant value
+C (Worker)                    B (Redis)         ← Third: foundation for C
+D (Alerting)                  C (Worker)        ← Fourth: needs Redis
+E (Autoscaling)               F (GitOps)        ← Fifth: automate before adding complexity
+F (GitOps)                    E (Autoscaling)   ← Sixth: HPA is a Helm template, manage via GitOps
+G (Canary)                    G (Canary)        ← Last: needs F + D
+```
+
+**Key insight:** Alerting (D) should jump ahead of Redis (B) because it requires ZERO code changes — it's just a PrometheusRule YAML in your Helm chart. You get immediate production-grade alerting in 1 hour. Redis requires code changes (cache logic, invalidation, Redis client) which is riskier and takes longer.
+
+### The Optimal Order Explained
+
+#### Step 1: Module A (Loki) — 2 hours
+
+**Why first:** Loki requires zero code changes. You install it via Helm, and it automatically starts collecting logs from all pods. Every subsequent module will be easier to debug because you can search across all service logs in Grafana.
+
+```
+What you need:     helm install loki (1 command)
+What you get:      Centralized logs for all 10+ pods
+Why before others: When Module B (Redis) or C (Worker) breaks,
+                   you'll want Loki to see what happened
+Risk:              None — Loki is read-only, doesn't affect your app
+```
+
+#### Step 2: Module D (Alerting) — 2 hours
+
+**Why second:** Alerting needs only Prometheus (already running) and a PrometheusRule YAML. No code changes, no new infrastructure, no Docker images. It's a single Helm template addition.
+
+```
+What you need:     1 YAML file (prometheusrule.yaml) in your Helm chart
+What you get:      Automatic alerts for crash loops, PVC capacity, error rates
+Why before Redis:  Zero risk, instant value, and you'll WANT alerts
+                   before adding Redis (a new dependency that can fail)
+Risk:              None — alerts are passive (they observe, don't affect the app)
+```
+
+```
+After this step, you have:
+  - Centralized logs (Loki from Step 1)
+  - Proactive alerts (Alertmanager from Step 2)
+  - Existing metrics (Prometheus from Stage 2)
+
+  This is a complete observability triad: metrics + logs + alerts.
+  You can now confidently add more infrastructure knowing you'll
+  see problems immediately.
+```
+
+#### Step 3: Module B (Redis) — 3 hours
+
+**Why third:** Redis is the foundation for Module C (BullMQ worker). Installing Redis first (as a caching layer) lets you validate the infrastructure before adding the complexity of a worker service.
+
+```
+What you need:     - StatefulSet + Service templates in Helm
+                   - Redis client in Next.js (npm install redis)
+                   - Cache-aside logic in API routes
+                   - Cache invalidation on mutations
+
+What you get:      - Faster API responses (cache hits skip PostgreSQL)
+                   - Redis infrastructure ready for Module C
+                   - Third StatefulSet pattern (after MinIO, Meilisearch)
+
+Why alerting first: If Redis has issues (OOM, connection refused),
+                    the alerts from Step 2 will catch it immediately
+Risk:              Medium — cache bugs (stale data, invalidation misses)
+                   can cause confusing behavior. Test thoroughly.
+```
+
+#### Step 4: Module C (Worker) — 3 hours
+
+**Why fourth:** BullMQ worker requires Redis (from Step 3). This module replaces fire-and-forget HTTP calls with durable, retryable jobs.
+
+```
+What you need:     - New service: services/worker/ with BullMQ
+                   - New Docker image: task-manager-worker
+                   - Worker Deployment template in Helm
+                   - Modify main app to enqueue jobs instead of
+                     fire-and-forget fetch() calls
+
+What you get:      - Jobs survive pod restarts (stored in Redis)
+                   - Automatic retries with backoff
+                   - Job visibility (BullMQ has a UI dashboard)
+                   - Umbrella chart restructuring (Helm subcharts)
+
+Why Redis first:   BullMQ literally cannot run without Redis
+Why alerts first:  Worker failures should trigger alerts
+                   (job backlog, retry exhaustion)
+Risk:              Medium-high — changes the communication pattern
+                   from fire-and-forget to queue-based. Need to handle
+                   the transition carefully (don't break existing
+                   notification/webhook flows).
+```
+
+#### Step 5: Module F (GitOps) — 3 hours
+
+**Why fifth (not earlier):** GitOps changes your entire deployment workflow. You want to do this AFTER your Helm chart is stable (Modules A-D are integrated). If you set up ArgoCD first and then keep changing the chart, ArgoCD will fight you (self-healing reverts manual changes).
+
+```
+What you need:     - Install ArgoCD in the cluster
+                   - Create Application CRD pointing to your repo
+                   - Move from manual `helm upgrade` to git-push-triggered sync
+                   - Configure image update strategy (how new Docker images
+                     get picked up — this is tricky with 9+ images)
+
+What you get:      - `git push` = deploy (no manual commands)
+                   - Audit trail (git history = deployment history)
+                   - Automatic drift detection and self-healing
+                   - Foundation for Module G (canary needs ArgoCD)
+
+Why after A-D:     Your chart needs to be STABLE before ArgoCD manages it.
+                   If ArgoCD is managing a chart that's changing every day,
+                   self-healing will constantly revert your manual debugging.
+                   Freeze the chart, then hand control to ArgoCD.
+Risk:              Low-medium — GitOps is additive (doesn't change the app,
+                   just the deployment process). Main risk is lock-in
+                   (harder to go back to manual deployments once automated).
+```
+
+```
+After this step, your workflow changes:
+
+  BEFORE (Steps 1-4):
+    1. Edit Helm chart
+    2. helm upgrade task-manager ./helm-chart --reuse-values --set ...
+    3. Watch pods restart
+    4. If broken: helm rollback
+
+  AFTER (Step 5+):
+    1. Edit Helm chart
+    2. git commit && git push
+    3. ArgoCD detects change, runs helm upgrade automatically
+    4. If broken: git revert && git push (ArgoCD rolls back)
+```
+
+#### Step 6: Module E (Autoscaling) — 3 hours
+
+**Why sixth:** HPA adds a HorizontalPodAutoscaler to your Helm chart. With GitOps (Step 5), this is just another template that ArgoCD manages. Without GitOps, you'd be manually applying HPA changes every time you tweak thresholds.
+
+```
+What you need:     - Install Prometheus Adapter (bridges metrics to K8s API)
+                   - Configure custom metric mapping (QPS from Prometheus)
+                   - Add HPA template to Helm chart
+                   - Load test with k6 to verify scaling behavior
+
+What you get:      - Pods scale up under load (1 → 5 replicas)
+                  - Pods scale down when idle (save resources)
+                   - Custom metric scaling (not just CPU-based)
+
+Why GitOps first:  HPA is a Helm template. With ArgoCD, threshold changes
+                   are just git commits. Without ArgoCD, you'd run
+                   helm upgrade every time you tune the scaling threshold.
+Risk:              Low — HPA is non-destructive (worst case: scales too
+                   aggressively or too conservatively, both fixable).
+                   Prometheus Adapter can be tricky to configure.
+```
+
+#### Step 7: Module G (Canary) — 4 hours
+
+**Why last:** Canary deployments are the most advanced pattern. They require:
+- Argo Rollouts (replaces Deployment CRD)
+- ArgoCD (for Rollout lifecycle management)
+- Prometheus metrics (for analysis templates)
+- NGINX traffic splitting (weighted routing)
+
+All three prerequisites come from earlier steps (F + D + E).
+
+```
+What you need:     - Install Argo Rollouts
+                   - Replace Deployment with Rollout in Helm chart
+                   - Define AnalysisTemplate (Prometheus success-rate query)
+                   - Configure NGINX traffic splitting
+                   - Learn kubectl argo rollouts promote/abort commands
+
+What you get:      - 10% canary → analyze → 50% → analyze → 100%
+                   - Automatic rollback if error rate > 5%
+                   - Zero-downtime releases (no more "all pods restart at once")
+
+Why everything first: Canary needs ALL the infrastructure you've built:
+                   - GitOps to manage the Rollout CRD (Step 5)
+                   - Prometheus metrics for analysis (Stage 2 + Step 2 alerts)
+                   - Stable Helm chart (you don't canary an unstable chart)
+                   - HPA to know baseline replica counts (Step 6)
+Risk:              Highest — changes the core Deployment resource.
+                   If misconfigured, can cause traffic routing issues.
+                   Only do this when everything else is stable.
+```
+
+### Summary: The Optimal Path
+
+```
+Step    Module     Effort    Prerequisites          What It Unlocks
+────    ───────    ──────    ─────────────          ───────────────
+1       A (Loki)   2 hrs     None                   Centralized logging
+                                                (helps debug everything after)
+
+2       D (Alerts) 2 hrs     Prometheus (running)   Proactive monitoring
+                                                (catches problems from B, C)
+
+3       B (Redis)  3 hrs     None                   Caching + foundation for C
+
+4       C (Worker) 3 hrs     Redis (Step 3)         Durable async processing
+                                                + Helm subcharts
+
+5       F (GitOps) 3 hrs     Stable chart (A-D)     Automated deployments
+                                                + foundation for E, G
+
+6       E (HPA)    3 hrs     GitOps (Step 5)        Auto-scaling under load
+                                                + Prometheus Adapter
+
+7       G (Canary) 4 hrs     GitOps (5) + Alerts(2) Progressive delivery
+                                                + metric-based rollback
+
+                    ─────────
+        Total:     20 hours  (2-4 hours per module)
+```
+
+### If You Only Have Time for 3 Modules
+
+```
+Must-have (production-critical):
+
+  1. Module D (Alerting)     — 2 hrs, zero risk, catches everything
+  2. Module A (Loki)         — 2 hrs, zero risk, unified debugging
+  3. Module F (GitOps)       — 3 hrs, transforms your workflow
+
+  Total: 7 hours
+  Result: You can detect problems (alerts), investigate them (logs),
+          and deploy fixes automatically (GitOps). This is the minimum
+          viable production setup.
+```
+
+### If You Have Time for 5 Modules
+
+```
+Must-have + high-impact:
+
+  1. Module D (Alerting)     — catch problems
+  2. Module A (Loki)         — investigate problems
+  3. Module B (Redis)        — caching + infrastructure for worker
+  4. Module C (Worker)       — reliable async processing
+  5. Module F (GitOps)       — automated deployments
+
+  Total: 13 hours
+  Result: Production-grade observability + caching + reliable workers
+          + automated deployments. This is a complete mid-level production setup.
+  Skip:   E (Autoscaling) and G (Canary) — nice but not essential for
+          a learning project with predictable traffic.
+```
+
+### Visual Timeline
+
+```
+Week 1 (6 hrs):
+  ┌─────────────┬──────────────┐
+  │ A: Loki     │ D: Alerting  │     Observability foundation
+  │ (2 hrs)     │ (2 hrs)      │     ── detect + investigate problems
+  └─────────────┴──────────────┘
+              + buffer/debugging (2 hrs)
+
+Week 2 (6 hrs):
+  ┌─────────────┬──────────────┐
+  │ B: Redis    │ C: Worker    │     Data + async infrastructure
+  │ (3 hrs)     │ (3 hrs)      │     ── caching + durable jobs
+  └─────────────┴──────────────┘
+              (sequential — C needs B)
+
+Week 3 (6 hrs):
+  ┌─────────────┬──────────────┐
+  │ F: GitOps   │ E: HPA       │     Deployment automation
+  │ (3 hrs)     │ (3 hrs)      │     ── auto-deploy + auto-scale
+  └─────────────┴──────────────┘
+              (sequential — E benefits from F)
+
+Week 4 (4 hrs):
+  ┌─────────────────────────────┐
+  │ G: Canary Deployments       │     Advanced progressive delivery
+  │ (4 hrs)                     │     ── zero-downtime, metric-based rollout
+  └─────────────────────────────┘
+              (needs everything from weeks 1-3)
+```
+
+### Infrastructure Accumulation
+
+After each step, your cluster grows. Here's what's running at each stage:
+
+```
+Step 0 (Baseline — Stage 2):
+  11 pods (app + 8 services + MinIO + Meilisearch)
+  + Prometheus + Grafana (monitoring namespace)
+  = ~13 pods
+
+Step 1 (Loki):      + 2 pods (loki + promtail)
+  = ~15 pods
+
+Step 2 (Alerting):  + 0 pods (Alertmanager already running)
+  = ~15 pods
+
+Step 3 (Redis):     + 1 pod (redis StatefulSet)
+  = ~16 pods
+
+Step 4 (Worker):    + 1 pod (worker Deployment)
+  = ~17 pods
+
+Step 5 (GitOps):    + 4 pods (argocd-server, argocd-repo-server,
+                              argocd-application-controller, argocd-redis)
+  = ~21 pods
+
+Step 6 (Autoscale): + 1 pod (prometheus-adapter)
+  = ~22 pods
+  + HPA can add up to 4 more app pods under load (1→5 replicas)
+
+Step 7 (Canary):    + 0 pods (Argo Rollouts controller is 1 pod, already counted)
+  But Rollout replaces Deployment, so during canary:
+  = ~24 pods (old version + new version pods coexisting temporarily)
+```
+
+```
+Minikube resource consideration:
+  Default Minikube: ~4-8 GB RAM
+  At Step 7:       ~24 pods consuming ~3-4 GB RAM
+
+  If Minikube struggles:
+  - Start with more memory: minikube start --memory=8192
+  - Skip non-essential pods during learning
+  - Use ArgoCD's HA-off mode (single replica)
 ```
 
 **Estimated effort per module:** 2-4 hours each.
