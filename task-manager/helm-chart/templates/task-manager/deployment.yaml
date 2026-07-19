@@ -74,6 +74,10 @@ spec:
             - name: FILE_SERVICE_URL
               value: "http://{{ include "task-manager.fullname" . }}-file-service:3005"
             {{- end }}
+            {{- if .Values.redis.enabled }}
+            - name: REDIS_URL
+              value: "redis://{{ include "task-manager.fullname" . }}-redis:6379"
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /
