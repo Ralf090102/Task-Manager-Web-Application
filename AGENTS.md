@@ -200,6 +200,59 @@ Uses Tailwind v4 with new `@import "tailwindcss"` syntax in `globals.css`. Do NO
     --set monitoring.serviceMonitor.labels.release=monitoring
   ```
 
+## Redis Caching Layer — Stage 3 Module B
+
+- **Purpose**: Cache task lists in Redis with 60s TTL to reduce PostgreSQL load (cache-aside pattern)
+- **Redis**: StatefulSet (`redis-0`) with `volumeClaimTemplates` (1Gi), Headless Service + ClusterIP Service, health probes via `redis-cli ping`
+- **Image**: `redis:7-alpine` (pre-pulled into Minikube)
+- **npm package**: `redis` (node-redis v4+) — NOT `ioredis` or `redis@3`
+- **Client**: `src/lib/redis.ts` — lazy connect singleton with graceful degradation (never throws, returns null on failure)
+- **Cache key**: `tasks:{userId}` — invalidated on task create/update/delete
+- **Pattern**: Cache-aside (check cache → DB fallback → write cache with TTL)
+- **TypeScript note**: `redis` v4 has complex generics — `ReturnType<typeof createClient>` for typing; avoid globalThis pattern (use module-level variable instead)
+- **Helm templates**: `templates/redis/` (StatefulSet, headless-service, service) — follows exact MinIO pattern
+- **values.yaml**: `redis:` section with `enabled`, `image`, `persistence`, `resources`
+- **Main app env var**: `REDIS_URL` added conditionally to deployment when `redis.enabled=true`
+- **Foundation for Module C**: Redis instance is shared with the BullMQ worker queue (Module C)
+- **Deploy commands**:
+  ```bash
+  # Pull Redis image into Minikube
+  minikube image pull redis:7-alpine
+
+  # Build app image with Redis caching code (from task-manager/, Docker Desktop)
+  docker build -t ralf090102/task-manager-app:latest -f Dockerfile .
+  minikube ssh "docker rmi -f ralf090102/task-manager-app:latest"
+  minikube image load ralf090102/task-manager-app:latest
+
+  # Helm upgrade with Redis enabled
+  # NOTE: --reuse-values does NOT read new values.yaml keys!
+  # Must pass ALL redis.* values via --set on first deploy:
+  helm upgrade task-manager ./helm-chart --namespace task-manager \
+    --reuse-values --no-hooks \
+    --set redis.enabled=true \
+    --set redis.image.repository=redis \
+    --set redis.image.tag=7-alpine \
+    --set redis.image.pullPolicy=Never \
+    --set redis.persistence.size=1Gi \
+    --set redis.resources.limits.cpu=250m \
+    --set redis.resources.limits.memory=256Mi \
+    --set redis.resources.requests.cpu=100m \
+    --set redis.resources.requests.memory=128Mi
+
+  # Subsequent upgrades only need --reuse-values:
+  helm upgrade task-manager ./helm-chart --namespace task-manager --reuse-values --no-hooks
+
+  # Verify Redis is running and healthy:
+  kubectl exec task-manager-redis-0 -n task-manager -- redis-cli PING
+  # Expected: PONG
+
+  # Check cache keys (after loading the dashboard to trigger cache write):
+  kubectl exec task-manager-redis-0 -n task-manager -- redis-cli DBSIZE
+  kubectl exec task-manager-redis-0 -n task-manager -- redis-cli KEYS "*"
+  kubectl exec task-manager-redis-0 -n task-manager -- redis-cli TTL "tasks:<userId>"
+  # TTL should be 50-60 seconds
+  ```
+
 ## Microservices Expansion — Stage 2
 
 ### Overview

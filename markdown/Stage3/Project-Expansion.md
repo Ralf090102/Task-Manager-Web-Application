@@ -141,7 +141,7 @@ No changes to the task-manager chart. Loki is installed as a separate release in
 
 ## Module B: Redis Caching Layer
 
-
+> **Status: COMPLETE** — Redis StatefulSet deployed with 1Gi PVC. Cache-aside pattern implemented in `/api/tasks` with 60s TTL. Cache key: `tasks:{userId}`, invalidated on mutations.
 
 ### Problem
 
