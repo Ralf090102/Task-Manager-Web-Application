@@ -100,6 +100,8 @@ TEAM_SERVICE_IMAGE="ralf090102/team-service"
 MINIO_IMAGE="minio/minio"
 MEILISEARCH_IMAGE="getmeili/meilisearch"
 MEILISEARCH_TAG="v1.6"
+REDIS_IMAGE="redis"
+REDIS_TAG="7-alpine"
 MICROSERVICE_TAG="latest"
 
 # Monitoring (kube-prometheus-stack) Helm release details
@@ -349,7 +351,8 @@ if [[ "$SKIP_BUILDS" == true ]]; then
                "${REALTIME_IMAGE}:${MICROSERVICE_TAG}" \
                "${ANALYTICS_IMAGE}:${MICROSERVICE_TAG}" \
                "${MINIO_IMAGE}:${MICROSERVICE_TAG}" \
-               "${MEILISEARCH_IMAGE}:${MEILISEARCH_TAG}"; do
+               "${MEILISEARCH_IMAGE}:${MEILISEARCH_TAG}" \
+               "${REDIS_IMAGE}:${REDIS_TAG}"; do
         if ! minikube image ls --format "{{.Repository}}:{{.Tag}}" 2>/dev/null | grep -q "$img"; then
             write_err "Image $img not found in Minikube. Run without --skip-builds first."
             exit 1
@@ -470,6 +473,15 @@ else
         exit 1
     fi
     write_ok "Meilisearch image loaded"
+
+    write_info "Pulling Redis image into Minikube..."
+    minikube image pull "${REDIS_IMAGE}:${REDIS_TAG}" >/dev/null 2>&1
+    if [[ $? -ne 0 ]]; then
+        write_err "Failed to pull ${REDIS_IMAGE}:${REDIS_TAG}"
+        write_err "Check internet connection or pull manually: docker pull ${REDIS_IMAGE}:${REDIS_TAG} && minikube image load ${REDIS_IMAGE}:${REDIS_TAG}"
+        exit 1
+    fi
+    write_ok "Redis image loaded"
 fi
 
 # ============================================================================
@@ -637,7 +649,16 @@ helm upgrade --install "$APP_RELEASE" \
     --set teamService.resources.limits.cpu=250m \
     --set teamService.resources.limits.memory=256Mi \
     --set teamService.resources.requests.cpu=100m \
-    --set teamService.resources.requests.memory=128Mi >/dev/null 2>&1
+    --set teamService.resources.requests.memory=128Mi \
+    --set redis.enabled=true \
+    --set redis.image.repository="${REDIS_IMAGE}" \
+    --set redis.image.tag="${REDIS_TAG}" \
+    --set redis.image.pullPolicy=Never \
+    --set redis.persistence.size=1Gi \
+    --set redis.resources.limits.cpu=250m \
+    --set redis.resources.limits.memory=256Mi \
+    --set redis.resources.requests.cpu=100m \
+    --set redis.resources.requests.memory=128Mi >/dev/null 2>&1
 
 if [[ $? -ne 0 ]]; then
     write_err "Helm deploy failed"
@@ -709,6 +730,9 @@ wait_for_pod "webhook" "webhook"
 
 # --- Team Service ---
 wait_for_pod "team-service" "team-service"
+
+# --- Redis ---
+wait_for_pod "redis" "Redis"
 
 # ============================================================================
 
@@ -907,6 +931,19 @@ else
     write_err "Meilisearch PVC not found"
 fi
 
+# --- 9a-6b: Verify Redis StatefulSet and PVC ---
+if kubectl get statefulset -n "$APP_NAMESPACE" 2>/dev/null | grep -q "redis"; then
+    write_ok "Redis StatefulSet created"
+else
+    write_err "Redis StatefulSet not found"
+fi
+
+if kubectl get pvc -n "$APP_NAMESPACE" 2>/dev/null | grep -q "redis"; then
+    write_ok "Redis PVC created"
+else
+    write_err "Redis PVC not found"
+fi
+
 # --- 9a-7: Verify search-sync Deployment and Service ---
 if kubectl get deployment -n "$APP_NAMESPACE" 2>/dev/null | grep -q "search-sync"; then
     write_ok "Search-sync Deployment created"
@@ -1033,6 +1070,7 @@ if [[ "$SKIP_MONITORING" == true ]]; then
     - Analytics (internal)    : ClusterIP:8000, Python analytics + weekly reports
     - Webhook (internal)      : ClusterIP:3003, webhook delivery with retry
     - Team service (internal) : ClusterIP:3002, team & workspace management
+    - Redis (internal)        : StatefulSet, in-memory cache (cache-aside, 60s TTL)
 
   Next steps:
 
@@ -1061,6 +1099,7 @@ else
     - Analytics (internal)    : ClusterIP:8000, Python analytics + weekly reports
     - Webhook (internal)      : ClusterIP:3003, webhook delivery with retry
     - Team service (internal) : ClusterIP:3002, team & workspace management
+    - Redis (internal)        : StatefulSet, in-memory cache (cache-aside, 60s TTL)
 
   Next steps:
 
