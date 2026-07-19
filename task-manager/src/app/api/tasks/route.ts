@@ -6,6 +6,7 @@ import { observeRequest, trackTaskOperation } from "@/lib/metrics";
 import logger from "@/lib/logger";
 import { emitToRealtime } from "@/lib/realtime";
 import { triggerWebhook } from "@/lib/webhook";
+import { getCache, setCache, invalidateCache } from "@/lib/redis";
 
 export async function GET() {
   const start = Date.now();
@@ -16,11 +17,22 @@ export async function GET() {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
+    const cacheKey = `tasks:${session.user.id}`;
+
+    const cached = await getCache<unknown[]>(cacheKey);
+    if (cached) {
+      trackTaskOperation("list", "success");
+      observeRequest("GET", "/api/tasks", 200, (Date.now() - start) / 1000);
+      return NextResponse.json(cached);
+    }
+
     const tasks = await prisma.task.findMany({
       where: { userId: session.user.id },
       orderBy: { createdAt: "desc" },
       include: { board: { select: { id: true, name: true, color: true } } },
     });
+
+    await setCache(cacheKey, tasks, 60);
 
     trackTaskOperation("list", "success");
     observeRequest("GET", "/api/tasks", 200, (Date.now() - start) / 1000);
@@ -72,6 +84,7 @@ export async function POST(req: Request) {
     trackTaskOperation("create", "success");
     logger.info({ taskId: task.id, userId: session.user.id }, "Task created");
     observeRequest("POST", "/api/tasks", 201, (Date.now() - start) / 1000);
+    await invalidateCache(`tasks:${session.user.id}`);
     emitToRealtime("task:created", task);
     triggerWebhook("task.created", task, session.user.id);
     return NextResponse.json(task, { status: 201 });

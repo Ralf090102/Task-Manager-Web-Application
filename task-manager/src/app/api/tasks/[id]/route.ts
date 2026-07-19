@@ -6,6 +6,7 @@ import { observeRequest, trackTaskOperation } from "@/lib/metrics";
 import logger from "@/lib/logger";
 import { emitToRealtime } from "@/lib/realtime";
 import { triggerWebhook } from "@/lib/webhook";
+import { invalidateCache } from "@/lib/redis";
 
 export async function GET(
   _req: Request,
@@ -92,6 +93,7 @@ export async function PUT(
     trackTaskOperation("update", "success");
     logger.info({ taskId: id, userId: session.user.id }, "Task updated");
     observeRequest("PUT", "/api/tasks/:id", 200, (Date.now() - start) / 1000);
+    await invalidateCache(`tasks:${session.user.id}`);
     emitToRealtime("task:updated", task);
     triggerWebhook("task.updated", task, session.user.id);
     return NextResponse.json(task);
@@ -133,6 +135,7 @@ export async function DELETE(
     trackTaskOperation("delete", "success");
     logger.info({ taskId: id, userId: session.user.id }, "Task deleted");
     observeRequest("DELETE", "/api/tasks/:id", 200, (Date.now() - start) / 1000);
+    await invalidateCache(`tasks:${session.user.id}`);
     emitToRealtime("task:deleted", { id });
     triggerWebhook("task.deleted", { id }, session.user.id);
     return NextResponse.json({ success: true });
