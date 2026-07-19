@@ -1328,3 +1328,1166 @@ io.connect() or io("/", {...})             WebSocket/Socket.io connection
 ```
 
 **The single most important distinction:** WebSocket/Socket.io/realtime are about **your browser and your server talking live**. Webhooks are about **your server notifying someone else's server**. They solve completely different problems that happen to share the word "web."
+
+---
+
+
+
+## Q7: In Kubernetes, what's a stateful app vs stateless app?
+
+
+
+### What Does "State" Mean?
+
+"State" means **data that the application stores and must survive restarts**. A database table, a file on disk, a search index — that's state. If the app loses it on restart, users lose data.
+
+```
+Stateless app (no data to lose):
+  - Receives a request
+  - Does some computation
+  - Returns a response
+  - Forgets everything
+
+  "What's 2 + 2?" → "4" → forgets you ever asked
+
+Stateful app (has data that must persist):
+  - Stores data somewhere (disk, memory, database)
+  - That data must survive restarts
+  - Losing it = data loss for users
+
+  "Create user John" → stores in database → next restart, John still exists
+```
+
+
+
+### The Bathroom Stall Analogy
+
+```
+STATELESS = a public bathroom stall
+
+  ┌──────────────────────────┐
+  │     Stall #1             │
+  │                          │
+  │  - No belongings left    │
+  │  - Next person starts    │
+  │    fresh                 │
+  │  - Any stall works       │
+  │    equally well          │
+  │  - Doesn't matter which  │
+  │    one you use           │
+  └──────────────────────────┘
+
+  If stall #1 is occupied, use stall #2. Identical experience.
+  If stall #1 is cleaned (restarted), nothing is lost.
+  You can add/remove stalls freely.
+
+
+STATEFUL = your bedroom
+
+  ┌──────────────────────────┐
+  │     Your Room            │
+  │                          │
+  │  - Your clothes in closet│
+  │  - Your bed (made a way) │
+  │  - Your stuff on shelves │
+  │  - THIS room is YOURS    │
+  │  - Can't just switch to  │
+  │    a random room         │
+  └──────────────────────────┘
+
+  If your room is "cleaned" (restarted), your stuff is gone = BAD.
+  Your stuff is tied to THIS specific room.
+  You can't just move to another room — your stuff is here.
+```
+
+
+
+### In This Project: Which Services Are Which?
+
+```
+STATELESS (Deployment) — 8 services:
+  ┌─────────────────────────────────────────────────────┐
+  │ Main App (Next.js)     File Service                 │
+  │ Notification           Search Sync                  │
+  │ Webhook                Team Service                 │
+  │ Realtime               Analytics                    │
+  │                                                     │
+  │ These don't store data locally.                     │
+  │ All data lives in:                                  │
+  │   - PostgreSQL (external Supabase)  ← shared DB     │
+  │   - Or they're just relay services (no data at all) │
+  │                                                     │
+  │ Kill any pod → recreate it → works identically      │
+  │ The new pod has no memory of the old one            │
+  └─────────────────────────────────────────────────────┘
+
+STATEFUL (StatefulSet) — 2 services:
+  ┌──────────────────────────────────────────────────────┐
+  │ MinIO        ← stores uploaded files on disk         │
+  │ Meilisearch  ← stores search index on disk           │
+  │                                                      │
+  │ These store data LOCALLY on a persistent volume.     │
+  │ Kill the pod → data must survive → volume reattaches │
+  │ The new pod picks up the SAME volume with SAME data  │
+  └──────────────────────────────────────────────────────┘
+```
+
+
+
+### Why the Distinction Matters: The Pod Identity Problem
+
+This is the core reason K8s has two different workload types:
+
+```
+STATELESS pod (Deployment):
+  Pod name: task-manager-app-xyz123     ← RANDOM suffix
+  Pod IP:   10.244.1.5                  ← RANDOM IP
+  Volume:   none (or shared, read-only)
+
+  Dies → new pod created:
+  Pod name: task-manager-app-abc789     ← DIFFERENT name
+  Pod IP:   10.244.1.9                  ← DIFFERENT IP
+  No data lost (there was no local data)
+
+  This is FINE. Any pod is interchangeable.
+
+
+STATEFUL pod (StatefulSet):
+  Pod name: minio-0                     ← STABLE, ordered name
+  Pod IP:   10.244.1.5                  ← may change, but...
+  Volume:   minio-data (10Gi)           ← MUST reattach to THIS pod
+
+  Dies → new pod created:
+  Pod name: minio-0                     ← SAME name!
+  Volume:   minio-data (SAME 10Gi)      ← SAME volume reattaches!
+
+  This pod is NOT interchangeable.
+  It has a specific identity and specific data.
+```
+
+```
+Why does MinIO need a stable identity?
+
+  MinIO stores files on disk. If MinIO's pod dies and restarts:
+    - The NEW pod must get the SAME disk
+    - Otherwise, all uploaded files are lost
+    - The pod name (minio-0) is linked to the volume (minio-data)
+
+  A Deployment can't guarantee this:
+    - Pod names are random
+    - Volumes are ephemeral (or shared across all replicas)
+    - No guarantee which pod gets which volume
+
+  A StatefulSet guarantees:
+    - Pod name is stable (minio-0, minio-1, minio-2)
+    - Each pod gets its OWN persistent volume
+    - If minio-0 dies, the replacement is also minio-0
+    - minio-0's volume reattaches to the new minio-0
+```
+
+
+
+### How K8s Handles Them Differently
+
+```
+                        Deployment                  StatefulSet
+                        ───────────                 ───────────
+Pod naming             Random suffix               Ordered (0, 1, 2...)
+                       app-xyz123, app-abc789      minio-0, minio-1
+
+Pod identity           Interchangeable             Each pod is unique
+                       Any pod serves any request  Pod 0 ≠ Pod 1
+
+Volume handling        Shared or ephemeral         Per-pod persistent volume
+                       (all replicas share one)    (minio-0 gets vol-0)
+
+Scaling                All at once                 Sequential, ordered
+                       1→3: creates 2 pods         1→3: create pod-1, wait,
+                       simultaneously              then create pod-2
+
+Startup order          Random                      Ordered (0 starts first)
+                       All pods start together     Pod-1 waits for Pod-0
+
+Rolling updates        Kills any pod               Kills highest-index first
+                       Random order                (minio-2 before minio-1)
+
+Persistent volume      One PVC shared by all       volumeClaimTemplates:
+                       (or none)                   each pod gets own PVC
+
+Network identity       Service load-balances       Headless Service gives
+                       to any pod                  each pod its own DNS:
+                                                   minio-0.minio-headless
+
+Use case               Web servers, APIs           Databases, queues, caches
+                       (any stateless app)         (any app with local data)
+```
+
+
+
+### The Storage Chain: How Stateful Data Survives
+
+```
+StatefulSet + PVC + PV = data that survives pod death
+
+  ┌──────────────────────────────────────────────────────┐
+  │                  Kubernetes Cluster                  │
+  │                                                      │
+  │  StatefulSet: minio                                  │
+  │  ┌───────────────────────────────────────────────┐   │
+  │  │  Pod: minio-0                                 │   │
+  │  │  ┌─────────────┐    ┌──────────────────────┐  │   │
+  │  │  │ Container   │    │ Volume Mount: /data  │  │   │
+  │  │  │ (MinIO)     │───→│                      │  │   │
+  │  │  │ writes files│    │ Points to PVC        │  │   │
+  │  │  │ to /data    │    └──────────┬───────────┘  │   │
+  │  │  └─────────────┘               │              │   │
+  │  └────────────────────────────────┼──────────────┘   │
+  │                                   │                  │
+  │  ┌────────────────────────────────▼─────────────┐    │
+  │  │ PVC: minio-data-minio-0                      │    │
+  │  │ (PersistentVolumeClaim — "I need 10Gi")      │    │
+  │  │ BOUND to:                                    │    │
+  │  └────────────────────────────────┬─────────────┘    │
+  │                                   │                  │
+  │  ┌────────────────────────────────▼──────────────┐   │
+  │  │ PV: pvc-abc123                                │   │
+  │  │ (PersistentVolume — actual disk on node)      │   │
+  │  │ 10Gi on Minikube's Docker volume              │   │
+  │  └───────────────────────────────────────────────┘   │
+  └──────────────────────────────────────────────────────┘
+
+When minio-0 pod dies:
+  1. StatefulSet creates a new minio-0 (same name!)
+  2. New pod mounts the SAME PVC (minio-data-minio-0)
+  3. PVC is still bound to the SAME PV (the disk)
+  4. All files are still on the disk
+  5. MinIO starts up and sees all its files again
+
+The data never left the disk. Only the pod (the process) was replaced.
+```
+
+
+
+### Why Most Microservices Are Stateless
+
+```
+The stateless ideal:
+
+  ┌──────────┐     ┌──────────┐     ┌──────────┐
+  │  Pod 1   │     │  Pod 2   │     │  Pod 3   │
+  │ (app)    │     │ (app)    │     │ (app)    │
+  └────┬─────┘     └────┬─────┘     └────┬─────┘
+       │                │                │
+       └────────────────┼────────────────┘
+                        │
+                   ┌────▼──────┐
+                   │ PostgreSQL│  ← ALL state lives here
+                   │ (external)│     (Supabase)
+                   └───────────┘
+
+  Benefits of keeping state OUTSIDE the pod:
+  - Kill any pod → no data lost (state is in the DB)
+  - Scale to 100 pods → they all share the same DB
+  - Deploy new version → old pods die, new pods start, data is safe
+  - Pod crashes → Deployment recreates it, picks up where it left off
+
+  This is why ALL 8 microservices in this project are stateless:
+  - Notification: reads/writes to shared PostgreSQL
+  - Webhook: reads/writes to shared PostgreSQL
+  - File Service: writes to MinIO (external to the pod)
+  - Search Sync: writes to Meilisearch (external to the pod)
+  - Realtime: no data at all (pure relay)
+  - etc.
+
+  The pod is just a worker. The DATA lives somewhere else.
+```
+
+
+
+### When Something MUST Be Stateful
+
+```
+MinIO and Meilisearch can't be stateless because they ARE the data store:
+
+  MinIO:
+    - Files are stored on disk as actual binary data
+    - Can't put files in PostgreSQL (too large, wrong tool)
+    - The pod's disk IS the data
+    - Must be stateful
+
+  Meilisearch:
+    - Search index is a complex data structure on disk
+    - Rebuilding the index from PostgreSQL takes minutes/hours
+    - The index must persist across restarts
+    - Must be stateful
+
+  Rule of thumb:
+    If the service IS the database/storage → stateful
+    If the service USES a database/storage → stateless
+```
+
+
+
+### What About the Database Itself?
+
+```
+PostgreSQL (Supabase) is stateful — but it's NOT in your cluster:
+
+  ┌─────────────────────────────┐
+  │  Your Minikube Cluster      │
+  │                             │
+  │  (stateless microservices)  │
+  │  (MinIO — stateful)         │
+  │  (Meilisearch — stateful)   │
+  │                             │
+  │  NO database running here   │
+  └──────────┬──────────────────┘
+             │ DATABASE_URL
+             ▼
+  ┌─────────────────────────────┐
+  │  Supabase Cloud (external)  │
+  │  PostgreSQL (stateful)      │  ← Someone else's problem
+  │  (backups, replication,     │     Supabase manages it
+  │   failover — all handled)   │
+  └─────────────────────────────┘
+
+Why external? Running PostgreSQL in K8s is hard:
+  - Needs StatefulSet with persistent volumes
+  - Needs backup automation
+  - Needs replication setup (primary + replicas)
+  - Needs failover logic (if primary dies, promote replica)
+  - Needs connection pooling (PgBouncer)
+
+  Supabase handles all of this for you.
+  In production, many teams use managed databases (RDS, Cloud SQL, Supabase)
+  rather than running stateful databases in K8s.
+```
+
+
+
+### Quick Reference Card
+
+```
+"Is this service stateful or stateless?"
+
+Ask: "If I delete this pod and recreate it, is any data lost?"
+
+  NO data lost → STATELESS → use Deployment
+    (data lives in external PostgreSQL, MinIO, Meilisearch)
+
+  YES, data lost → STATEFUL → use StatefulSet
+    (data lives on the pod's own disk)
+
+Ask: "Does this service need a stable identity?"
+
+  No, any pod works → STATELESS → Deployment
+
+  Yes, pod-0 must always be pod-0 → STATEFUL → StatefulSet
+
+Ask: "Does it manage its own storage?"
+
+  No, delegates to external DB → STATELESS → Deployment
+
+  Yes, IS the storage → STATEFUL → StatefulSet
+```
+
+
+
+### The Bigger Picture: Stateful vs Stateless Across the Stack
+
+```
+Layer              Stateless              Stateful
+──────────────────────────────────────────────────────
+Pod (K8s)          Deployment             StatefulSet
+                   (random pod names)     (ordered: minio-0, minio-1)
+
+Service (K8s)      ClusterIP              Headless Service
+                   (load-balanced)        (returns individual pod IPs)
+
+Storage            No local volume        PersistentVolume per pod
+                   (or shared, read-only) (volumeClaimTemplates)
+
+HTTP Session       JWT (stateless)        Server session (stateful)
+                   Token contains all      Server stores session data
+                   the info needed         (must persist across requests)
+
+App architecture   REST API               Database, message queue,
+                   (each request is        cache, file storage
+                   self-contained)
+
+Scaling            Horizontal (add pods)  Vertical (bigger machine)
+                   Easy, just replicas    Hard, data must migrate
+```
+
+**The trend in modern architecture is toward statelessness.** Services stay stateless; state is pushed to dedicated systems (managed databases, object storage, search engines). This is exactly what this project does — 8 stateless services + 2 stateful storage systems + 1 external database. The stateless majority can be killed, restarted, and scaled freely. The stateful minority (MinIO, Meilisearch) are handled carefully with StatefulSets and persistent volumes.
+
+---
+
+
+
+## Q8: What makes a pod? Do we create pod manifests, or does Kubernetes create them automatically?
+
+Great question — this gets at the core of how Kubernetes is designed. The short answer is: **you almost never create Pod manifests directly. Controllers create Pods for you automatically.**
+
+### The Two Ways to Create a Pod
+
+```
+Way 1: Direct Pod manifest (almost never done)
+  ─────────────────────────────────────────────
+  You write a YAML with kind: Pod
+  kubectl apply -f pod.yaml
+  → K8s creates exactly ONE pod
+  → If it crashes, it stays dead (nobody restarts it)
+  → If the node dies, the pod is gone forever
+
+Way 2: Controller creates Pods for you (what you actually do)
+  ──────────────────────────────────────────────────────────
+  You write a YAML with kind: Deployment
+  kubectl apply -f deployment.yaml
+  → K8s creates the Deployment object
+  → The Deployment CONTROLLER reads it
+  → Controller creates Pods automatically
+  → If a Pod crashes, controller creates a new one
+  → If a node dies, controller recreates Pods elsewhere
+```
+
+
+
+### What a Bare Pod Manifest Looks Like (You Don't Write This)
+
+Yes, `kind: Pod` is a valid Kubernetes manifest. But nobody uses it in production:
+
+```yaml
+# bare-pod.yaml — DON'T DO THIS (except for learning/debugging)
+
+apiVersion: v1
+kind: Pod                          # ← Direct pod, no controller
+metadata:
+  name: my-task-app
+spec:
+  containers:
+    - name: task-app
+      image: ralf090102/task-manager-app:latest
+      ports:
+        - containerPort: 3000
+
+# Problems:
+#   - Crashes → stays dead forever (no restart)
+#   - Node dies → pod is permanently lost
+#   - Can't scale (only 1 pod, no replicas)
+#   - Can't update (no rolling updates)
+#   - This is basically Docker Compose inside K8s (defeats the purpose)
+```
+
+This is why Level-4 said "Pods are rarely created directly. They're created by Deployments." You write a **Deployment** manifest, and the Deployment controller creates Pods from the template inside it.
+
+### What You Actually Write: The Pod Template Inside a Controller
+
+The Pod definition lives INSIDE the Deployment manifest, as a **template**:
+
+```yaml
+# deployment.yaml — THIS is what you write
+
+apiVersion: apps/v1
+kind: Deployment                          # ← The controller
+metadata:
+  name: task-manager
+spec:
+  replicas: 1                             # ← "I want 1 pod"
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: app
+  template:                               # ← THE POD TEMPLATE
+    metadata:
+      labels:
+        app.kubernetes.io/component: app
+    spec:                                 # ← THIS IS A POD SPEC
+      containers:                         #    (same as the bare pod above)
+        - name: task-app
+          image: ralf090102/task-manager-app:latest
+          ports:
+            - containerPort: 3000
+```
+
+```
+The template section IS the pod definition — it's just wrapped in a controller:
+
+  ┌──────────────────────────────────────────────────┐
+  │  kind: Deployment                                │
+  │  ┌────────────────────────────────────────────┐  │
+  │  │  spec.replicas: 1                          │  │
+  │  │  spec.template: ← THIS IS A POD SPEC       │  │
+  │  │  ┌──────────────────────────────────────┐  │  │
+  │  │  │  containers:                         │  │  │
+  │  │  │    - image: task-manager-app         │  │  │
+  │  │  │    - ports: [3000]                   │  │  │
+  │  │  │    - env: [...]                      │  │  │
+  │  │  │    - probes: [...]                   │  │  │
+  │  │  └──────────────────────────────────────┘  │  │
+  │  └────────────────────────────────────────────┘  │
+  └──────────────────────────────────────────────────┘
+
+  You never write kind: Pod.
+  You write kind: Deployment with a template that describes the pod.
+  The controller creates the pod FOR you.
+```
+
+
+
+### Who Actually Creates the Pod? (It's Not kubectl)
+
+This is the key insight: **kubectl doesn't create Pods.** kubectl just talks to the API server. The **controller** (running inside the cluster) creates Pods:
+
+```
+Step-by-step: what happens when you run helm install
+
+  1. YOU run: helm install task-manager ./helm-chart
+     │
+     ▼
+  2. Helm renders templates → produces YAML (Deployment, Service, etc.)
+     │
+     ▼
+  3. Helm sends YAML to K8s API Server via kubectl
+     "Here's a Deployment object. Please store it."
+     │
+     ▼
+  4. API Server stores the Deployment in etcd (the cluster database)
+     "Deployment 'task-manager' saved. replicas: 1."
+     │
+     ▼
+  5. Deployment Controller (running inside the cluster) NOTICES the new Deployment
+     "Oh, someone wants 1 replica of task-manager. I need to create 1 Pod."
+     │
+     ▼
+  6. Deployment Controller creates a Pod object (via the API server)
+     "API Server, please create this Pod from my template."
+     │
+     ▼
+  7. Scheduler (another controller) NOTICES the unscheduled Pod
+     "There's a Pod with no Node assigned. Let me pick a Node."
+     │
+     ▼
+  8. Scheduler assigns the Pod to a Node
+     "Pod goes to Node-1."
+     │
+     ▼
+  9. Kubelet (agent on Node-1) NOTICES a Pod assigned to it
+     "I have a Pod to run. Let me start the container."
+     │
+     ▼
+  10. Kubelet tells containerd/Docker to pull the image and start the container
+      "docker run ralf090102/task-manager-app:latest"
+      │
+      ▼
+  11. Container starts → Pod is Running
+```
+
+```
+Who did what:
+
+  You:         Wrote a Deployment manifest, ran helm install
+  Helm:        Rendered templates, sent to API server
+  API Server:  Stored objects in etcd
+  Controller:  WATCHED for Deployments, CREATED the Pod  ← THIS IS THE ANSWER
+  Scheduler:   Chose which Node to run the Pod on
+  Kubelet:     Actually started the container on the Node
+
+  kubectl/Helm = messenger (carries your instructions)
+  Controller   = manager (decides what Pods to create)
+  Kubelet      = worker (starts the actual container)
+```
+
+
+
+### The Controller Pattern: A Reconciliation Loop
+
+The Deployment controller runs a continuous **reconciliation loop** (same concept as Operators from Level-4 §14):
+
+```
+Deployment Controller (always running inside the cluster):
+
+  while True:
+    desired = read Deployment → "replicas: 1"
+    actual  = count running Pods for this Deployment
+
+    if actual < desired:
+      create (desired - actual) Pods from template
+
+    if actual > desired:
+      delete extra Pods
+
+    if a Pod's template changed (rolling update):
+      create new Pod, delete old Pod
+```
+
+```
+This is why the Pod gets recreated when it crashes:
+
+  Pod dies (OOM, crash, node failure)
+    │
+    ▼
+  Controller loop runs (within seconds)
+    "Desired: 1. Actual: 0. Mismatch!"
+    │
+    ▼
+  Controller creates a new Pod from the template
+    │
+    ▼
+  New Pod starts → Actual: 1 → Match → Controller waits
+
+  You didn't do anything. The controller did it automatically.
+  This is the "self-healing" you saw in Level-4.
+```
+
+
+
+### Every Controller Creates Pods Differently
+
+Different controllers wrap the same Pod template but manage it differently:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                                                                     │
+│  Deployment                                                         │
+│  "I want N identical interchangeable pods"                          │
+│  template: { containers: [...] }                                    │
+│  behavior: creates N pods, replaces on crash, rolling updates       │
+│  example: main app, notification, webhook (all stateless services)  │
+│                                                                     │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  StatefulSet                                                        │
+│  "I want N pods with stable identities and individual storage"      │
+│  template: { containers: [...] } + volumeClaimTemplates             │
+│  behavior: creates pods sequentially (0, 1, 2), each gets own volume│
+│  example: MinIO (minio-0), Meilisearch (meilisearch-0)              │
+│                                                                     │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  CronJob                                                            │
+│  "I want a pod to run on a schedule"                                │
+│  jobTemplate: { template: { containers: [...] } }                   │
+│  behavior: creates a Pod at scheduled times, Pod runs then exits    │
+│  example: scheduler (every 5 min), analytics weekly report          │
+│                                                                     │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Job                                                                │
+│  "I want a pod to run once to completion"                           │
+│  template: { containers: [...] }                                    │
+│  behavior: creates a Pod, retries until it succeeds, then stops     │
+│  example: DB migration Job (runs prisma db push, then exits)        │
+│                                                                     │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  DaemonSet                                                          │
+│  "I want ONE pod on EVERY node"                                     │
+│  template: { containers: [...] }                                    │
+│  behavior: automatically creates a Pod on each Node (1:1)           │
+│  example: Promtail (one per node, collects logs)                    │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+
+ALL of them use the SAME pod spec (containers, ports, env, probes).
+The difference is HOW the controller manages the pods.
+```
+
+
+
+### The Object Hierarchy in Kubernetes
+
+```
+What you create (via manifest)     What K8s creates automatically
+──────────────────────────────────────────────────────────────────
+
+  Deployment                        ReplicaSet (version tracking)
+       │                                  │
+       │                                  └── Pod  ← K8s creates this
+       │                                       │
+       │                                       └── Container (your app)
+
+  StatefulSet                       (no ReplicaSet)
+       │                                  │
+       │                                  └── Pod (minio-0)  ← stable identity
+       │                                       │
+       │                                       └── Container
+
+  CronJob                           Job (per schedule trigger)
+       │                                  │
+       │                                  └── Pod  ← runs once, exits
+
+  DaemonSet                         (nothing intermediate)
+       │                                  │
+       │                                  └── Pod (one per Node)
+
+  Service                           Endpoints (list of Pod IPs)
+       │                                  │
+       │                                  └── keeps updating as Pods come/go
+
+You only ever write manifests for the LEFT column.
+Everything on the RIGHT is created by K8s controllers automatically.
+```
+
+```
+Proof — run these commands:
+
+  kubectl get deployments -n task-manager     ← YOU created these (via Helm)
+  kubectl get replicasets -n task-manager     ← K8s created these (you didn't)
+  kubectl get pods -n task-manager            ← K8s created these (you didn't)
+  kubectl get endpoints -n task-manager       ← K8s created these (you didn't)
+
+  The ReplicaSet, Pods, and Endpoints are ALL auto-generated.
+  You only "asked" for Deployments and Services.
+```
+
+
+
+### When WOULD You Create a Bare Pod?
+
+Almost never in production. But there are a few debugging/learning scenarios:
+
+```
+Valid uses of kind: Pod (bare pod):
+
+  1. Quick debugging
+     "Let me run a curl pod to test if my service is reachable"
+     kubectl run debug-pod --image=curlimages/curl --rm -it -- sh
+
+  2. Learning Kubernetes
+     "I want to understand pods before learning controllers"
+
+  3. One-off initialization (though initContainers or Jobs are better)
+
+  4. Testing a container image quickly
+
+Invalid uses:
+
+  - Running your production app (use a Deployment)
+  - Running a database (use a StatefulSet)
+  - Running a scheduled task (use a CronJob)
+  - Anything that needs to survive restarts (use a controller)
+```
+
+The `kubectl run` command (without `--generator`) actually creates a bare Pod for debugging:
+
+```bash
+# This creates a bare pod (for debugging, auto-deleted when you exit)
+kubectl run debug --image=busybox --rm -it -- sh
+#                                                         ↑ runs interactively
+#                                            ↑ removes pod when you exit
+```
+
+
+
+### Summary: The Mental Model
+
+```
+QUESTION: "What makes a pod?"
+
+ANSWER: A controller makes pods. You make controllers.
+
+  You write:     kind: Deployment (with a pod template inside)
+  Helm sends:    the Deployment to the API server
+  API server:    stores it in etcd
+  Controller:    watches etcd, sees the Deployment, creates Pods from the template
+  Scheduler:     assigns each Pod to a Node
+  Kubelet:       starts the container on that Node
+
+  You never type "kind: Pod" in a manifest.
+  You never "create" a pod directly.
+  You declare WHAT you want (Deployment with replicas: 3)
+  The controller creates and maintains the pods to match.
+
+This is the "declarative" model:
+  You don't say "create 3 pods"
+  You say "I want 3 replicas to always be running"
+  K8s figures out HOW to make that happen (create, recreate, reschedule)
+```
+
+---
+
+## Q9: What is a ConfigMap (as a K8s kind)? And why is there no `config.yaml` in my microservices and app?
+
+### What a ConfigMap Is
+
+A ConfigMap is a Kubernetes resource (`kind: ConfigMap`) that stores **non-sensitive configuration as key-value pairs**. It exists inside the cluster, not inside your application code:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap            # ← A K8s object, like Deployment or Service
+metadata:
+  name: webhook-config     # ← Name to reference it
+data:                      # ← The actual configuration
+  MAX_ATTEMPTS: "5"        # key: value pairs (always strings)
+  BACKOFF_INTERVALS: "1,5,30,120,600"
+  POLL_INTERVAL_MS: "2000"
+  DELIVERY_TIMEOUT_MS: "10000"
+```
+
+```
+ConfigMap is to K8s what .env is to a Node.js app:
+  .env file:    MAX_ATTEMPTS=5 (read by dotenv at runtime)
+  ConfigMap:    MAX_ATTEMPTS: "5" (read by K8s, injected as env var)
+
+  The difference:
+    .env lives in your repo (or on the server)
+    ConfigMap lives INSIDE the Kubernetes cluster
+    ConfigMap can be updated without touching your code or Docker image
+```
+
+### Where ConfigMaps Live in This Project
+
+ConfigMaps are **Kubernetes manifests**, not application files. They live in the Helm chart, not in your service code:
+
+```
+task-manager/
+├── src/                           ← App code (NO ConfigMaps here)
+├── services/
+│   ├── webhook/
+│   │   └── src/index.ts           ← Service code (NO ConfigMaps here)
+│   └── notification/
+│       └── src/index.ts           ← Service code (NO ConfigMaps here)
+└── helm-chart/                    ← ALL K8s manifests live here
+    ├── values.yaml                ← Configuration values
+    └── templates/
+        └── webhook/
+            └── configmap.yaml     ← THE ConfigMap (only webhook has one)
+```
+
+```
+This project has exactly ONE ConfigMap:
+
+  helm-chart/templates/webhook/configmap.yaml
+
+  Why only webhook?
+    The webhook service has tunable retry parameters that might change
+    (max attempts, backoff intervals, poll interval, timeout).
+    A ConfigMap lets you change these WITHOUT rebuilding the Docker image.
+
+  Other services don't have ConfigMaps because:
+    - They have no tunable config (realtime, team-service)
+    - Their config comes from Secrets (DATABASE_URL)
+    - Their config is hardcoded in the Deployment env section (PORT)
+```
+
+
+
+### Why There's No `config.yaml` in Your App Code
+
+This is the key insight: **your application code doesn't read config files. It reads environment variables.** ConfigMaps are just one way K8s populates those environment variables.
+
+```
+Your webhook service code (services/webhook/src/index.ts):
+
+  const MAX_ATTEMPTS = parseInt(process.env.MAX_ATTEMPTS || "5", 10);
+  const BACKOFF_INTERVALS = process.env.BACKOFF_INTERVALS || "1,5,30,120,600";
+  const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || "2000", 10);
+
+  The code reads:    process.env.MAX_ATTEMPTS
+  The code does NOT: read a config file, import a config module, etc.
+
+  Where does process.env.MAX_ATTEMPTS come from?
+  → K8s injects it from the ConfigMap at pod startup.
+  → The code has NO idea a ConfigMap exists.
+  → If you ran this code outside K8s (local dev), you'd use a .env file instead.
+```
+
+```
+The code is CONFIG-SOURCE-AGNOSTIC:
+
+  process.env.MAX_ATTEMPTS works regardless of WHERE the value came from:
+
+  In K8s:      ConfigMap → env var → process.env.MAX_ATTEMPTS
+  In Docker:   docker run -e MAX_ATTEMPTS=5 → process.env.MAX_ATTEMPTS
+  In local dev: .env file (via dotenv) → process.env.MAX_ATTEMPTS
+  In CI:       GitHub Actions secrets → env var → process.env.MAX_ATTEMPTS
+
+  The code doesn't change. Only the SOURCE of the env var changes.
+```
+
+
+
+### The Full Chain: How Config Gets From values.yaml Into Your Code
+
+```
+Step 1: values.yaml (Helm values)
+─────────────────────────────────
+  webhook:
+    retry:
+      maxAttempts: 5
+      intervals: [1, 5, 30, 120, 600]
+
+
+Step 2: helm-chart/templates/webhook/configmap.yaml (Helm template)
+────────────────────────────────────────────────────────────────────
+  apiVersion: v1
+  kind: ConfigMap
+  metadata:
+    name: webhook-config
+  data:
+    MAX_ATTEMPTS: "{{ .Values.webhook.retry.maxAttempts }}"
+    BACKOFF_INTERVALS: "{{ join "," .Values.webhook.retry.intervals }}"
+
+
+Step 3: Helm renders → actual ConfigMap YAML (at deploy time)
+─────────────────────────────────────────────────────────────
+  apiVersion: v1
+  kind: ConfigMap
+  metadata:
+    name: webhook-config
+  data:
+    MAX_ATTEMPTS: "5"
+    BACKOFF_INTERVALS: "1,5,30,120,600"
+
+
+Step 4: helm install → K8s stores the ConfigMap
+────────────────────────────────────────────────
+
+
+Step 5: Webhook Deployment references the ConfigMap
+───────────────────────────────────────────────────
+  helm-chart/templates/webhook/deployment.yaml:
+
+  spec:
+    template:
+      spec:
+        containers:
+          - name: webhook
+            envFrom:                        ← "Inject ALL ConfigMap keys as env vars"
+              - configMapRef:
+                  name: webhook-config
+            env:
+              - name: DATABASE_URL          ← "Inject from Secret"
+                valueFrom:
+                  secretKeyRef:
+                    name: task-manager-secrets
+                    key: database-url
+
+
+Step 6: K8s starts the pod → injects env vars
+─────────────────────────────────────────────
+  Container environment:
+    MAX_ATTEMPTS=5
+    BACKOFF_INTERVALS=1,5,30,120,600
+    POLL_INTERVAL_MS=2000
+    DELIVERY_TIMEOUT_MS=10000
+    DATABASE_URL=postgresql://...  (from Secret)
+
+
+Step 7: Your code reads process.env
+───────────────────────────────────
+  services/webhook/src/index.ts:
+
+  const MAX_ATTEMPTS = parseInt(process.env.MAX_ATTEMPTS || "5", 10);
+  // process.env.MAX_ATTEMPTS = "5" (from ConfigMap → env var)
+```
+
+```
+Visual summary:
+
+  values.yaml                    Your configuration
+       │
+       ▼
+  configmap.yaml (template)      Helm template
+       │
+       ▼  (helm render)
+  ConfigMap (K8s object)         Stored in cluster
+       │
+       ▼  (envFrom in Deployment)
+  Container environment vars     Injected into pod
+       │
+       ▼
+  process.env.MAX_ATTEMPTS       Your code reads this
+       │
+       ▼
+  parseInt(...) → 5              Used as a number
+
+  Your CODE never touches a config file.
+  It only reads process.env.* and trusts K8s to fill them in.
+```
+
+
+
+### ConfigMap vs Secret vs Inline — Three Ways to Set Env Vars
+
+Looking at the webhook deployment, there are THREE sources of env vars:
+
+```yaml
+# From helm-chart/templates/webhook/deployment.yaml
+
+containers:
+  - name: webhook
+    envFrom:                           # SOURCE 1: ConfigMap (all keys at once)
+      - configMapRef:
+          name: webhook-config
+
+    env:
+      - name: DATABASE_URL             # SOURCE 2: Secret (one key at a time)
+        valueFrom:
+          secretKeyRef:
+            name: task-manager-secrets
+            key: database-url
+
+      - name: LOG_LEVEL               # SOURCE 3: Inline value (hardcoded)
+        value: "info"
+```
+
+```
+When to use each:
+
+  ConfigMap:   Non-sensitive config that might change (retry settings, feature flags)
+               Multiple keys injected at once via envFrom
+               Updateable without code/image changes
+
+  Secret:      Sensitive data (passwords, API keys, tokens)
+              Base64-encoded (not encrypted — just encoded)
+               One key at a time via secretKeyRef
+               Updateable without code/image changes
+
+  Inline:      Constants that NEVER change (LOG_LEVEL, PORT)
+               Hardcoded in the Deployment YAML
+               Changing requires helm upgrade (but no image rebuild)
+
+  ALL THREE become process.env.* inside the container.
+  The code can't tell which source a value came from.
+```
+
+
+
+### The Twelve-Factor App Principle
+
+This design follows a well-known methodology called the **Twelve-Factor App**, which says:
+
+> **Store config in the environment.**
+
+```
+BAD (config in code):
+  // config.js
+  module.exports = {
+    maxAttempts: 5,           ← Hardcoded in source
+    databaseUrl: "postgres:..." ← Hardcoded in source
+  }
+
+  Problems:
+  - Change config → must edit code → must rebuild image → must redeploy
+  - Different values for dev/prod → need different code branches
+  - Secrets in code → visible in Git history
+
+GOOD (config in environment):
+  // index.ts
+  const maxAttempts = parseInt(process.env.MAX_ATTEMPTS || "5");
+
+  Benefits:
+  - Same code runs everywhere (dev, staging, prod)
+  - Change config → update ConfigMap/Secret → restart pod (no rebuild)
+  - Different values per environment → different ConfigMaps
+  - Secrets never in Git → stored in K8s Secrets
+```
+
+This is why your project has NO `config.json`, `config.yaml`, or `settings.ts` files. All configuration flows through environment variables, which are populated by K8s ConfigMaps and Secrets at runtime.
+
+
+
+### Why Most Services Don't Even Have a ConfigMap
+
+Looking at the Helm chart, only the webhook service has a ConfigMap. The other 7 services don't:
+
+```
+Services WITH a ConfigMap:
+  ✓ Webhook (retry config: MAX_ATTEMPTS, BACKOFF_INTERVALS, etc.)
+    → Has tunable parameters that operators might want to change
+
+Services WITHOUT a ConfigMap:
+  ✗ Main app          → Uses Secrets (DATABASE_URL, NEXTAUTH_SECRET)
+  ✗ Notification      → Uses Secrets (DATABASE_URL) + inline (SMTP_PORT)
+  ✗ File Service      → Uses Secrets (DATABASE_URL) + inline (MINIO_URL)
+  ✗ Search Sync       → Uses Secrets (DATABASE_URL) + inline (MEILI_URL)
+  ✗ Realtime          → Uses inline (CORS_ORIGIN)
+  ✗ Team Service      → Uses Secrets (DATABASE_URL)
+  ✗ Analytics         → Uses inline (DATABASE_URL cleaning logic)
+  ✗ Scheduler         → Uses Secrets (DATABASE_URL)
+```
+
+```
+Why don't these services need ConfigMaps?
+
+  Their env vars fall into two categories:
+  1. Secrets  → DATABASE_URL, NEXTAUTH_SECRET (stored in K8s Secret)
+  2. Constants → PORT, LOG_LEVEL (hardcoded inline in Deployment YAML)
+
+  They have NO "tunable" non-sensitive config.
+  → Nothing that an operator would change without rebuilding.
+  → ConfigMap would be overkill.
+
+  The webhook service is different because:
+  - Retry intervals might need tuning (slow external servers → longer timeouts)
+  - Poll interval might need adjustment (high load → slower polling)
+  - These are operational knobs, not secrets, not constants
+  → ConfigMap makes them changeable without a Docker rebuild
+```
+
+
+
+### How to Change ConfigMap Values
+
+```
+Method 1: helm upgrade with --set (temporary override)
+
+  helm upgrade task-manager ./helm-chart --namespace task-manager \
+    --reuse-values \
+    --set webhook.retry.maxAttempts=10 \
+    --set webhook.retry.intervals="{1,10,60,300,1800}"
+
+  → Helm re-renders the ConfigMap template with new values
+  → Updates the ConfigMap in K8s
+  → You still need to restart pods to pick up new values:
+    kubectl rollout restart deployment/task-manager-webhook -n task-manager
+
+
+Method 2: Edit values.yaml (permanent change)
+
+  # helm-chart/values.yaml
+  webhook:
+    retry:
+      maxAttempts: 10              ← Changed from 5
+      intervals: [1, 10, 60, 300, 1800]
+
+  helm upgrade task-manager ./helm-chart --namespace task-manager --reuse-values
+
+
+Method 3: Edit the ConfigMap directly (quick and dirty, not recommended)
+
+  kubectl edit configmap task-manager-webhook-config -n task-manager
+  # Opens editor, change values, save
+  # WARNING: This change is NOT in Git. Next helm upgrade will OVERWRITE it.
+```
+
+
+
+### Summary: The Mental Model
+
+```
+QUESTION: "What is a ConfigMap and why is there no config.yaml in my app?"
+
+ANSWER:
+
+  A ConfigMap is a K8s object (kind: ConfigMap) that stores key-value config.
+  It lives INSIDE the cluster, managed by Helm templates.
+  It does NOT exist in your application source code.
+
+  There's no config.yaml in your services because:
+  1. Your code reads process.env.* (environment variables)
+  2. K8s injects those env vars from ConfigMaps + Secrets at pod startup
+  3. The code is "config-source-agnostic" — same code works in K8s,
+     Docker, local dev, or CI
+
+  ConfigMap flow:
+    values.yaml → Helm template → ConfigMap (K8s) → envFrom → process.env
+
+  Only the webhook service has a ConfigMap (tunable retry settings).
+  Other services use Secrets (for sensitive data) or inline values (for constants).
+
+  This follows the Twelve-Factor App principle:
+    "Store config in the environment, not in the code."
+```
+

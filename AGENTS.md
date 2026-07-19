@@ -149,14 +149,18 @@ Uses Tailwind v4 with new `@import "tailwindcss"` syntax in `globals.css`. Do NO
 - Components: Prometheus (metrics scraping), Grafana (dashboards), Alertmanager, node-exporter
 - App metrics: `prom-client` library, exposed at `/api/metrics`
 - Structured logging: `pino` logger (JSON format), configured in `src/lib/logger.ts`
+- **Log aggregation**: Loki + Promtail in `monitoring` namespace (Stage 3 Module A)
+  - Loki: StatefulSet storing all pod logs with 5Gi PVC
+  - Promtail: DaemonSet collecting logs from `/var/log/pods/*` on each node
+  - Grafana datasource auto-provisioned by loki-stack chart
 - ServiceMonitor: `task-manager/helm-chart/templates/servicemonitor.yaml`
   - Label `release: monitoring` required for Prometheus Operator discovery
   - Scrapes `/api/metrics` every 15s on the `http` port
 - Accessing monitoring UIs (requires `kubectl port-forward`):
   ```bash
-  # Grafana (admin/admin)
+  # Grafana (admin/admin) — metrics + logs + dashboards
   kubectl port-forward -n monitoring svc/monitoring-grafana 3001:80
-  # Open http://localhost:3001
+  # Open http://localhost:3001 → Explore → Loki datasource for LogQL queries
 
   # Prometheus
   kubectl port-forward -n monitoring svc/monitoring-kube-prometheus-prometheus 9090:9090
@@ -169,6 +173,23 @@ Uses Tailwind v4 with new `@import "tailwindcss"` syntax in `globals.css`. Do NO
   helm install monitoring prometheus-community/kube-prometheus-stack \
     --namespace monitoring --create-namespace \
     --set grafana.adminPassword=admin
+  ```
+- Installing Loki + Promtail (log aggregation):
+  ```bash
+  helm repo add grafana https://grafana.github.io/helm-charts
+  helm install loki grafana/loki-stack \
+    --namespace monitoring \
+    --set loki.persistence.enabled=true \
+    --set loki.persistence.size=5Gi \
+    --set promtail.enabled=true \
+    --set loki.isDefault=false  # Prevents conflict with Prometheus (default datasource)
+  ```
+- LogQL query examples:
+  ```logql
+  {namespace="task-manager"}                              -- all task-manager logs
+  {namespace="task-manager", container="webhook"}         -- only webhook service
+  {namespace="task-manager"} |= "error"                   -- lines containing "error"
+  sum(count_over_time({namespace="task-manager"}[5m])) by (pod)  -- log volume chart
   ```
 - Helm upgrade with new ServiceMonitor keys (when `--reuse-values` doesn't merge new keys):
   ```bash
