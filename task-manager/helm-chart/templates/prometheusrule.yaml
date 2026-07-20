@@ -1,0 +1,74 @@
+{{- if .Values.alerting.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "task-manager.fullname" . }}-alerts
+  labels:
+    {{- include "task-manager.labels" . | nindent 4 }}
+    release: monitoring
+spec:
+  groups:
+    - name: task-manager
+      rules:
+        # Alert 1: Main app unreachable (Prometheus can't scrape /api/metrics)
+        - alert: TaskManagerDown
+          expr: up{namespace="task-manager", job="task-manager"} == 0
+          for: 2m
+          labels:
+            severity: critical
+            service: app
+          annotations:
+            summary: "Task Manager main app is down"
+            description: "Prometheus has not been able to scrape {{` {{ $labels.instance }} `}} for 2 minutes. The pod may be crashed, OOM-killed, or not responding on /api/metrics."
+
+        # Alert 2: High 5xx error rate (>10% for 5 minutes)
+        - alert: HighErrorRate
+          expr: |
+            sum(rate(http_request_duration_seconds_count{namespace="task-manager", status_code=~"5.."}[5m])) by (route)
+            /
+            clamp_min(sum(rate(http_request_duration_seconds_count{namespace="task-manager"}[5m])) by (route), 1)
+            > 0.1
+          for: 5m
+          labels:
+            severity: critical
+            service: app
+          annotations:
+            summary: "High error rate on route {{` {{ $labels.route }} `}}"
+            description: "Route {{` {{ $labels.route }} `}} is returning >10% 5xx errors for the last 5 minutes. Current rate: {{` {{ $value | humanizePercentage }} `}}."
+
+        # Alert 3: Pod crash looping (any pod in task-manager namespace)
+        - alert: PodCrashLooping
+          expr: increase(kube_pod_container_status_restarts_total{namespace="task-manager"}[15m]) > 3
+          for: 1m
+          labels:
+            severity: warning
+            service: infrastructure
+          annotations:
+            summary: "Pod {{` {{ $labels.pod }} `}} is crash looping"
+            description: "Container {{` {{ $labels.container }} `}} in pod {{` {{ $labels.pod }} `}} has restarted {{` {{ $value }} `}} times in the last 15 minutes."
+
+        # Alert 4: No task activity for 10 minutes (potential outage)
+        - alert: NoTaskActivity
+          expr: sum(rate(task_operations_total[10m])) == 0
+          for: 10m
+          labels:
+            severity: warning
+            service: app
+          annotations:
+            summary: "No task operations in the last 10 minutes"
+            description: "The application has recorded zero task operations (create/update/delete/list) for 10 minutes. This may indicate users cannot reach the app or authentication is broken."
+
+        # Alert 5: PVC almost full (>85% for 10 minutes)
+        # Covers Redis, MinIO, Meilisearch persistent volumes
+        - alert: PersistentVolumeAlmostFull
+          expr: |
+            kubelet_volume_stats_used_bytes{namespace="task-manager"}
+            / kubelet_volume_stats_capacity_bytes{namespace="task-manager"} > 0.85
+          for: 10m
+          labels:
+            severity: warning
+            service: infrastructure
+          annotations:
+            summary: "PVC {{` {{ $labels.persistentvolumeclaim }} `}} is >85% full"
+            description: "Persistent volume {{` {{ $labels.persistentvolumeclaim }} `}} is at {{` {{ $value | humanizePercentage }} `}} capacity. If it reaches 100%, the pod using it will stop functioning."
+{{- end }}

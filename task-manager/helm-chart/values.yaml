@@ -230,3 +230,6 @@ worker:
     requests:
       cpu: 100m
       memory: 128Mi
+
+alerting:
+  enabled: true

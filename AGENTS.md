@@ -293,6 +293,48 @@ Uses Tailwind v4 with new `@import "tailwindcss"` syntax in `globals.css`. Do NO
   # Expected: "processing job: search.index", "task indexed in meilisearch", "job completed: search.index"
   ```
 
+## Alerting Rules — Stage 3 Module D
+
+- **Purpose**: Proactive monitoring — PrometheusRules define alert conditions that fire automatically based on metric thresholds, sent to Alertmanager for routing/notifications
+- **PrometheusRule CRD**: `templates/prometheusrule.yaml` — 5 alert rules, conditional on `.Values.alerting.enabled`
+- **Label requirement**: `release: monitoring` on the PrometheusRule — Prometheus Operator uses `ruleSelector.matchLabels.release=monitoring` to discover rules
+- **Helm escaping**: Prometheus annotation templates (`{{ $labels.xxx }}`) must be escaped in Helm using `` {{` {{ $labels.xxx }} `}} `` — otherwise Helm tries to evaluate them as Go template variables
+- **Alert rules**:
+  - `TaskManagerDown` — `up{job="task-manager"} == 0` for 2m — **critical** — main app unreachable
+  - `HighErrorRate` — 5xx rate >10% per route for 5m — **critical** — uses `http_request_duration_seconds_count{status_code=~"5.."}`
+  - `PodCrashLooping` — `increase(kube_pod_container_status_restarts_total[15m]) > 3` for 1m — **warning** — any pod in namespace
+  - `NoTaskActivity` — `sum(rate(task_operations_total[10m])) == 0` for 10m — **warning** — potential outage/auth failure
+  - `PersistentVolumeAlmostFull` — PVC usage >85% for 10m — **warning** — Redis, MinIO, Meilisearch volumes
+- **Alert lifecycle**: `inactive` → `pending` (condition true, waiting for `for` duration) → `firing` (condition true for full duration) → `resolved` (condition cleared)
+- **Alertmanager**: Already installed by `kube-prometheus-stack` — no additional installation needed
+- **values.yaml**: `alerting.enabled: true` (simple toggle, thresholds hardcoded in template for readability)
+- **Deploy commands**:
+  ```bash
+  # Helm upgrade (first time: must pass alerting.enabled via --set since it's a new key)
+  helm upgrade task-manager ./helm-chart --namespace task-manager --reuse-values --no-hooks --set alerting.enabled=true
+
+  # Verify PrometheusRule exists:
+  kubectl get prometheusrule -n task-manager
+  # Expected: task-manager-alerts
+
+  # Verify rules loaded in Prometheus:
+  kubectl port-forward -n monitoring svc/monitoring-kube-prometheus-prometheus 9090:9090
+  # Open http://localhost:9090/rules or query API:
+  curl http://localhost:9090/api/v1/rules | jq '.data.groups[] | select(.name=="task-manager")'
+
+  # Check active alerts:
+  curl http://localhost:9090/api/v1/alerts | jq '.data.alerts[] | select(.labels.alertname | startswith("Task") or startswith("High") or startswith("Pod") or startswith("No") or startswith("Persistent"))'
+
+  # Access Alertmanager UI:
+  kubectl port-forward -n monitoring svc/monitoring-kube-prometheus-alertmanager 9093:9093
+  # Open http://localhost:9093 — see firing/pending alerts, silences, status
+
+  # Test: trigger TaskManagerDown by scaling down:
+  kubectl scale deployment task-manager -n task-manager --replicas=0
+  # Wait 2+ minutes, check Alertmanager UI
+  kubectl scale deployment task-manager -n task-manager --replicas=1
+  ```
+
 ## Microservices Expansion — Stage 2
 
 ### Overview

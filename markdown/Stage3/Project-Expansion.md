@@ -422,6 +422,8 @@ spec:
 
 ## Module D: Alerting Rules with Alertmanager
 
+> **Status: COMPLETE** — PrometheusRule with 5 alerts deployed: TaskManagerDown, HighErrorRate, PodCrashLooping, NoTaskActivity, PersistentVolumeAlmostFull. Verified in Prometheus and Alertmanager. Alert lifecycle confirmed (inactive → pending → firing).
+
 
 
 ### Problem
