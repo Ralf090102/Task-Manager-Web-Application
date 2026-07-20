@@ -279,7 +279,7 @@ await redis.del(`tasks:${session.user.id}`);
 
 ## Module C: Background Worker Microservice
 
-
+> **Status: COMPLETE** — BullMQ worker service deployed. Queue `task-events` with handlers: `search.index`, `search.remove`, `task.overdue.check` (hourly repeatable). Main app enqueues jobs via `src/lib/queue.ts`. E2E verified: task created → job enqueued → worker indexes in Meilisearch (60→61 docs).
 
 ### Problem
 

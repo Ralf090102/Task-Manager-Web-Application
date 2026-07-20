@@ -253,6 +253,46 @@ Uses Tailwind v4 with new `@import "tailwindcss"` syntax in `globals.css`. Do NO
   # TTL should be 50-60 seconds
   ```
 
+## BullMQ Worker Queue — Stage 3 Module C
+
+- **Purpose**: Durable background job processing via BullMQ (Redis-backed queue) — replaces fire-and-forget HTTP calls for search indexing and overdue notifications
+- **Worker service**: `services/worker/` — Node.js microservice consuming jobs from `task-events` queue
+- **npm packages**: `bullmq` and `ioredis` (both required — BullMQ uses ioredis internally with `maxRetriesPerRequest: null`)
+- **CRITICAL Next.js config**: `serverExternalPackages: ["bullmq", "ioredis"]` in `next.config.ts` — without this, Next.js standalone output tracing omits these packages and `enqueueTaskEvent` fails silently
+- **Worker**: `services/worker/src/index.ts` — BullMQ Worker on queue `task-events`
+  - Job handlers: `search.index` (POST to search-sync `/sync/task`), `search.remove` (DELETE to search-sync), `task.overdue.check` (query DB for overdue tasks, create notifications)
+  - Repeatable job: hourly overdue check (`0 * * * *` cron)
+  - Health server on port 3007 (`{"status":"ok","queue":"task-events"}`)
+  - Graceful shutdown on SIGTERM/SIGINT
+- **Queue client**: `src/lib/queue.ts` — `enqueueTaskEvent(name, data)` with graceful degradation (never throws, logs warning on failure)
+  - Job config: attempts 3, exponential backoff 2000ms, removeOnComplete: 100, removeOnFail: 200
+- **Task API integration**: POST `/api/tasks` → enqueue `search.index`; PUT → enqueue `search.index`; DELETE → enqueue `search.remove`
+- **Shared Redis**: Worker and main app both connect to the same Redis instance (from Module B)
+- **Helm templates**: `templates/worker/` (Deployment with health probes, Service ClusterIP:3007)
+- **values.yaml**: `worker:` section with `enabled`, `image`, `resources`
+- **Image**: `ralf090102/worker-service:latest`
+- **Build context**: `task-manager/` (same as other services)
+- **Deploy commands**:
+  ```bash
+  # Build worker image (from task-manager/, Docker Desktop)
+  docker build -t ralf090102/worker-service:latest -f services/worker/Dockerfile .
+  minikube image load ralf090102/worker-service:latest
+
+  # Helm upgrade (values.yaml already has worker config)
+  helm upgrade task-manager ./helm-chart --namespace task-manager --reuse-values --no-hooks
+
+  # Verify worker health:
+  kubectl exec deployment/task-manager -n task-manager -- node -e "fetch('http://task-manager-worker:3007/health').then(r=>r.json()).then(j=>console.log(j))"
+  # Expected: {"status":"ok","queue":"task-events"}
+
+  # Check BullMQ queue keys in Redis:
+  kubectl exec task-manager-redis-0 -n task-manager -- redis-cli KEYS "bull:task-events:*"
+
+  # Check worker logs for job processing:
+  kubectl logs deployment/task-manager-worker -n task-manager --tail=10
+  # Expected: "processing job: search.index", "task indexed in meilisearch", "job completed: search.index"
+  ```
+
 ## Microservices Expansion — Stage 2
 
 ### Overview
