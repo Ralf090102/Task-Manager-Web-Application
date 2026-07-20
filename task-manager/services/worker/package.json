@@ -1,0 +1,24 @@
+{
+  "name": "worker-service",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "BullMQ worker service - durable job queue processing",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@prisma/adapter-pg": "^7.8.0",
+    "@prisma/client": "^7.8.0",
+    "bullmq": "^5.30.0",
+    "ioredis": "^5.4.0",
+    "tsx": "^4.19.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "prisma": "^7.8.0",
+    "typescript": "^5.0.0"
+  }
+}
