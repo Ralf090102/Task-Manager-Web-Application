@@ -7,6 +7,7 @@ import logger from "@/lib/logger";
 import { emitToRealtime } from "@/lib/realtime";
 import { triggerWebhook } from "@/lib/webhook";
 import { invalidateCache } from "@/lib/redis";
+import { enqueueTaskEvent } from "@/lib/queue";
 
 export async function GET(
   _req: Request,
@@ -94,6 +95,7 @@ export async function PUT(
     logger.info({ taskId: id, userId: session.user.id }, "Task updated");
     observeRequest("PUT", "/api/tasks/:id", 200, (Date.now() - start) / 1000);
     await invalidateCache(`tasks:${session.user.id}`);
+    enqueueTaskEvent("search.index", { taskId: task.id });
     emitToRealtime("task:updated", task);
     triggerWebhook("task.updated", task, session.user.id);
     return NextResponse.json(task);
@@ -136,6 +138,7 @@ export async function DELETE(
     logger.info({ taskId: id, userId: session.user.id }, "Task deleted");
     observeRequest("DELETE", "/api/tasks/:id", 200, (Date.now() - start) / 1000);
     await invalidateCache(`tasks:${session.user.id}`);
+    enqueueTaskEvent("search.remove", { taskId: id });
     emitToRealtime("task:deleted", { id });
     triggerWebhook("task.deleted", { id }, session.user.id);
     return NextResponse.json({ success: true });

@@ -7,6 +7,7 @@ import logger from "@/lib/logger";
 import { emitToRealtime } from "@/lib/realtime";
 import { triggerWebhook } from "@/lib/webhook";
 import { getCache, setCache, invalidateCache } from "@/lib/redis";
+import { enqueueTaskEvent } from "@/lib/queue";
 
 export async function GET() {
   const start = Date.now();
@@ -85,6 +86,7 @@ export async function POST(req: Request) {
     logger.info({ taskId: task.id, userId: session.user.id }, "Task created");
     observeRequest("POST", "/api/tasks", 201, (Date.now() - start) / 1000);
     await invalidateCache(`tasks:${session.user.id}`);
+    enqueueTaskEvent("search.index", { taskId: task.id });
     emitToRealtime("task:created", task);
     triggerWebhook("task.created", task, session.user.id);
     return NextResponse.json(task, { status: 201 });
