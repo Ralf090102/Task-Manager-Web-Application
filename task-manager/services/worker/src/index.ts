@@ -1,9 +1,11 @@
 import { Worker, Queue, QueueEvents } from "bullmq";
 import IORedis from "ioredis";
+import http from "http";
 import { PrismaClient } from "./generated/prisma/client.ts";
 import { PrismaPg } from "@prisma/adapter-pg";
 
 const QUEUE_NAME = "task-events";
+const HEALTH_PORT = 3007;
 
 const connection = new IORedis(process.env.REDIS_URL || "redis://localhost:6379", {
   maxRetriesPerRequest: null,
@@ -145,6 +147,20 @@ worker.on("error", (err) => {
 
 log("info", `worker listening on queue "${QUEUE_NAME}"`);
 
+const healthServer = http.createServer((req, res) => {
+  if (req.url === "/health") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ status: "ok", queue: QUEUE_NAME }));
+  } else {
+    res.writeHead(404);
+    res.end();
+  }
+});
+
+healthServer.listen(HEALTH_PORT, "0.0.0.0", () => {
+  log("info", `health server listening on port ${HEALTH_PORT}`);
+});
+
 const queue = new Queue(QUEUE_NAME, { connection });
 
 async function setupRepeatableJobs() {
@@ -179,6 +195,7 @@ queueEvents.on("failed", ({ jobId, failedReason }) => {
 
 async function shutdown(signal: string) {
   log("info", `received ${signal}, shutting down...`);
+  healthServer.close();
   await worker.close();
   await queue.close();
   await queueEvents.close();

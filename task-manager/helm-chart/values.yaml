@@ -216,3 +216,17 @@ redis:
     requests:
       cpu: 100m
       memory: 128Mi
+
+worker:
+  enabled: true
+  image:
+    repository: ralf090102/worker-service
+    pullPolicy: Never
+    tag: latest
+  resources:
+    limits:
+      cpu: 250m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi

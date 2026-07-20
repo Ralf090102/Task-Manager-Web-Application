@@ -98,6 +98,7 @@ REALTIME_IMAGE="ralf090102/realtime-service"
 ANALYTICS_IMAGE="ralf090102/analytics-service"
 WEBHOOK_IMAGE="ralf090102/webhook-service"
 TEAM_SERVICE_IMAGE="ralf090102/team-service"
+WORKER_IMAGE="ralf090102/worker-service"
 MINIO_IMAGE="minio/minio"
 MEILISEARCH_IMAGE="getmeili/meilisearch"
 MEILISEARCH_TAG="v1.6"
@@ -353,7 +354,8 @@ if [[ "$SKIP_BUILDS" == true ]]; then
                "${ANALYTICS_IMAGE}:${MICROSERVICE_TAG}" \
                "${MINIO_IMAGE}:${MICROSERVICE_TAG}" \
                "${MEILISEARCH_IMAGE}:${MEILISEARCH_TAG}" \
-               "${REDIS_IMAGE}:${REDIS_TAG}"; do
+               "${REDIS_IMAGE}:${REDIS_TAG}" \
+               "${WORKER_IMAGE}:${MICROSERVICE_TAG}"; do
         if ! minikube image ls --format "{{.Repository}}:{{.Tag}}" 2>/dev/null | grep -q "$img"; then
             write_err "Image $img not found in Minikube. Run without --skip-builds first."
             exit 1
@@ -391,6 +393,7 @@ else
         "analytics|${ANALYTICS_IMAGE}:${MICROSERVICE_TAG}|${BUILD_CONTEXT}/services/analytics/Dockerfile"
         "webhook|${WEBHOOK_IMAGE}:${MICROSERVICE_TAG}|${BUILD_CONTEXT}/services/webhook/Dockerfile"
         "team-service|${TEAM_SERVICE_IMAGE}:${MICROSERVICE_TAG}|${BUILD_CONTEXT}/services/team-service/Dockerfile"
+        "worker|${WORKER_IMAGE}:${MICROSERVICE_TAG}|${BUILD_CONTEXT}/services/worker/Dockerfile"
     )
 
     # Create a temp dir for parallel build logs (so output stays clean)
@@ -629,6 +632,9 @@ wait_for_pod "team-service" "team-service"
 # --- Redis ---
 wait_for_pod "redis" "Redis"
 
+# --- Worker ---
+wait_for_pod "worker" "worker"
+
 # ============================================================================
 
 # Skipped entirely when --skip-monitoring is passed.
@@ -833,6 +839,19 @@ else
     write_err "Redis PVC not found"
 fi
 
+# --- 9a-6c: Verify Worker Deployment and Service ---
+if kubectl get deployment -n "$APP_NAMESPACE" 2>/dev/null | grep -q "worker"; then
+    write_ok "Worker Deployment created"
+else
+    write_err "Worker Deployment not found"
+fi
+
+if kubectl get svc -n "$APP_NAMESPACE" 2>/dev/null | grep -q "worker"; then
+    write_ok "Worker Service created"
+else
+    write_err "Worker Service not found"
+fi
+
 # --- 9a-7: Verify search-sync Deployment and Service ---
 if kubectl get deployment -n "$APP_NAMESPACE" 2>/dev/null | grep -q "search-sync"; then
     write_ok "Search-sync Deployment created"
@@ -960,6 +979,7 @@ if [[ "$SKIP_MONITORING" == true ]]; then
     - Webhook (internal)      : ClusterIP:3003, webhook delivery with retry
     - Team service (internal) : ClusterIP:3002, team & workspace management
     - Redis (internal)        : StatefulSet, in-memory cache (cache-aside, 60s TTL)
+    - Worker (internal)       : ClusterIP:3007, BullMQ job queue (search sync, overdue checks)
 
   Next steps:
 
@@ -989,6 +1009,7 @@ else
     - Webhook (internal)      : ClusterIP:3003, webhook delivery with retry
     - Team service (internal) : ClusterIP:3002, team & workspace management
     - Redis (internal)        : StatefulSet, in-memory cache (cache-aside, 60s TTL)
+    - Worker (internal)       : ClusterIP:3007, BullMQ job queue (search sync, overdue checks)
 
   Next steps:
 
