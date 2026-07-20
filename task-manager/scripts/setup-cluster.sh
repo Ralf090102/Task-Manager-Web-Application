@@ -86,7 +86,8 @@ MINIKUBE_CPU=4
 MINIKUBE_MEMORY_MB=7168       # 7 GB (fits within Docker Desktop's ~7.9GB default)
 KUBERNETES_VERSION="v1.35.1"
 
-# Docker image names
+# Docker image names (used for docker build + minikube image load/pull ONLY)
+# Helm configuration (repos, tags, pullPolicy) comes from helm-chart/values.yaml
 APP_NAME="ralf090102/task-manager-app"
 APP_TAG="latest"
 SCHEDULER_IMAGE="ralf090102/scheduler-service"
@@ -522,24 +523,17 @@ fi
 #   - Existing release -> upgrades it
 # This makes the script idempotent for --skip-recreate runs.
 #
-# All services are deployed in a single Helm release. Each service's
-# templates are conditionally rendered via {{- if .Values.<svc>.enabled }}.
+# All service configuration (images, resources, enabled flags, SMTP, persistence)
+# comes from helm-chart/values.yaml — Helm reads it automatically from the chart
+# directory. Only 3 values MUST be set via --set:
 #
-# --set image.pullPolicy=Never / scheduler.* / notification.*
-#   All local Minikube images must use pullPolicy=Never. Without it, K8s
-#   tries to pull from Docker Hub and gets ImagePullBackOff.
+# --set "secrets.databaseUrl=..." / "secrets.nextauthSecret=..."
+#   Injected from the .env file at runtime (secrets must never be committed
+#   to values.yaml).
 #
-# --set notification.smtp.* / notification.resources.*
-#   On first deploy, --reuse-values is NOT used, so values.yaml defaults
-#   apply. But all notification.* keys MUST be explicitly set via --set
-#   because the initial deploy reads values.yaml fresh — and the
-#   notification section IS in values.yaml, so defaults are picked up.
-#   However, to be safe and explicit, we set all keys here.
-#
-# --set-string secrets.authTrustHost="true"
-#   NextAuth v5 security setting for non-HTTPS environments.
-#   MUST use --set-string (not --set) because Helm parses "true" as a boolean,
-#   and b64enc in the secret template expects a string.
+# --set "monitoring.enabled=${MONITORING_FLAG}"
+#   Conditional: false on a fresh cluster (ServiceMonitor CRD doesn't exist yet),
+#   true once kube-prometheus-stack is installed (Step 7 → Step 8 flips this).
 #
 # --no-hooks
 #   Skips the db-migration pre-upgrade hook (team-service) which runs
@@ -557,108 +551,9 @@ helm upgrade --install "$APP_RELEASE" \
     --namespace "$APP_NAMESPACE" \
     --create-namespace \
     --no-hooks \
-    --set image.pullPolicy=Never \
     --set "monitoring.enabled=${MONITORING_FLAG}" \
-    --set monitoring.serviceMonitor.scrapeInterval=15s \
-    --set monitoring.serviceMonitor.labels.release=monitoring \
     --set "secrets.databaseUrl=${DATABASE_URL}" \
-    --set "secrets.nextauthSecret=${NEXTAUTH_SECRET}" \
-    --set 'secrets.nextauthUrl=http://task-manager.local' \
-    --set-string 'secrets.authTrustHost=true' \
-    --set scheduler.enabled=true \
-    --set scheduler.image.pullPolicy=Never \
-    --set notification.enabled=true \
-    --set notification.image.repository="${NOTIFICATION_IMAGE}" \
-    --set notification.image.tag="${MICROSERVICE_TAG}" \
-    --set notification.image.pullPolicy=Never \
-    --set notification.smtp.host="" \
-    --set notification.smtp.port="587" \
-    --set notification.smtp.from="noreply@taskmanager.local" \
-    --set notification.smtp.user="" \
-    --set notification.smtp.password="" \
-    --set notification.resources.limits.cpu=250m \
-    --set notification.resources.limits.memory=256Mi \
-    --set notification.resources.requests.cpu=100m \
-    --set notification.resources.requests.memory=128Mi \
-    --set minio.enabled=true \
-    --set minio.image.repository="${MINIO_IMAGE}" \
-    --set minio.image.tag="${MICROSERVICE_TAG}" \
-    --set minio.image.pullPolicy=Never \
-    --set minio.persistence.size=10Gi \
-    --set minio.accessKey=minioadmin \
-    --set minio.secretKey=minioadmin \
-    --set minio.resources.limits.cpu=250m \
-    --set minio.resources.limits.memory=512Mi \
-    --set minio.resources.requests.cpu=100m \
-    --set minio.resources.requests.memory=256Mi \
-    --set fileService.enabled=true \
-    --set fileService.image.repository="${FILE_SERVICE_IMAGE}" \
-    --set fileService.image.tag="${MICROSERVICE_TAG}" \
-    --set fileService.image.pullPolicy=Never \
-    --set fileService.resources.limits.cpu=250m \
-    --set fileService.resources.limits.memory=256Mi \
-    --set fileService.resources.requests.cpu=100m \
-    --set fileService.resources.requests.memory=128Mi \
-    --set meilisearch.enabled=true \
-    --set meilisearch.image.repository="${MEILISEARCH_IMAGE}" \
-    --set meilisearch.image.tag="${MEILISEARCH_TAG}" \
-    --set meilisearch.image.pullPolicy=Never \
-    --set meilisearch.persistence.size=5Gi \
-    --set meilisearch.masterKey="meili-master-key-change-me" \
-    --set meilisearch.resources.limits.cpu=250m \
-    --set meilisearch.resources.limits.memory=512Mi \
-    --set meilisearch.resources.requests.cpu=100m \
-    --set meilisearch.resources.requests.memory=256Mi \
-    --set searchSync.enabled=true \
-    --set searchSync.image.repository="${SEARCH_SYNC_IMAGE}" \
-    --set searchSync.image.tag="${MICROSERVICE_TAG}" \
-    --set searchSync.image.pullPolicy=Never \
-    --set searchSync.resources.limits.cpu=250m \
-    --set searchSync.resources.limits.memory=256Mi \
-    --set searchSync.resources.requests.cpu=100m \
-    --set searchSync.resources.requests.memory=128Mi \
-    --set realtime.enabled=true \
-    --set realtime.image.repository="${REALTIME_IMAGE}" \
-    --set realtime.image.tag="${MICROSERVICE_TAG}" \
-    --set realtime.image.pullPolicy=Never \
-    --set realtime.corsOrigin="http://task-manager.local" \
-    --set realtime.resources.limits.cpu=250m \
-    --set realtime.resources.limits.memory=256Mi \
-    --set realtime.resources.requests.cpu=100m \
-    --set realtime.resources.requests.memory=128Mi \
-    --set analytics.enabled=true \
-    --set analytics.image.repository="${ANALYTICS_IMAGE}" \
-    --set analytics.image.tag="${MICROSERVICE_TAG}" \
-    --set analytics.image.pullPolicy=Never \
-    --set analytics.resources.limits.cpu=250m \
-    --set analytics.resources.limits.memory=256Mi \
-    --set analytics.resources.requests.cpu=100m \
-    --set analytics.resources.requests.memory=128Mi \
-    --set webhook.enabled=true \
-    --set webhook.image.repository="${WEBHOOK_IMAGE}" \
-    --set webhook.image.tag="${MICROSERVICE_TAG}" \
-    --set webhook.image.pullPolicy=Never \
-    --set webhook.resources.limits.cpu=250m \
-    --set webhook.resources.limits.memory=256Mi \
-    --set webhook.resources.requests.cpu=100m \
-    --set webhook.resources.requests.memory=128Mi \
-    --set teamService.enabled=true \
-    --set teamService.image.repository="${TEAM_SERVICE_IMAGE}" \
-    --set teamService.image.tag="${MICROSERVICE_TAG}" \
-    --set teamService.image.pullPolicy=Never \
-    --set teamService.resources.limits.cpu=250m \
-    --set teamService.resources.limits.memory=256Mi \
-    --set teamService.resources.requests.cpu=100m \
-    --set teamService.resources.requests.memory=128Mi \
-    --set redis.enabled=true \
-    --set redis.image.repository="${REDIS_IMAGE}" \
-    --set redis.image.tag="${REDIS_TAG}" \
-    --set redis.image.pullPolicy=Never \
-    --set redis.persistence.size=1Gi \
-    --set redis.resources.limits.cpu=250m \
-    --set redis.resources.limits.memory=256Mi \
-    --set redis.resources.requests.cpu=100m \
-    --set redis.resources.requests.memory=128Mi >/dev/null 2>&1
+    --set "secrets.nextauthSecret=${NEXTAUTH_SECRET}" >/dev/null 2>&1
 
 if [[ $? -ne 0 ]]; then
     write_err "Helm deploy failed"
@@ -835,25 +730,19 @@ else
     # we upgrade the task-manager Helm release to enable monitoring.
     #
     # --reuse-values
-    #   Keeps all values from the previous deploy (Step 6): secrets, pullPolicy, etc.
-    #   Without this, Helm would reset to values.yaml defaults (empty secrets!).
+    #   Keeps all values from the previous deploy (Step 6): secrets, pullPolicy,
+    #   image repos, resources, etc. — everything from values.yaml + the 3 --set flags.
     #
     # --set monitoring.enabled=true
-    #   Enables the ServiceMonitor template (templates/task-manager/servicemonitor.yaml)
-    #
-    # --set monitoring.serviceMonitor.labels.release=monitoring
-    #   CRITICAL: The Prometheus Operator uses this label to discover ServiceMonitors.
-    #   Without "release: monitoring", Prometheus ignores our ServiceMonitor entirely.
-    #   This must match the Helm release name of kube-prometheus-stack ("monitoring").
+    #   Flips the only value that changed: enables the ServiceMonitor template.
+    #   (monitoring.serviceMonitor.scrapeInterval and labels are already in values.yaml.)
     write_info "Upgrading Helm release with monitoring enabled..."
 
     helm upgrade "$APP_RELEASE" \
         "${PROJECT_ROOT}/task-manager/helm-chart" \
         --namespace "$APP_NAMESPACE" \
         --reuse-values \
-        --set monitoring.enabled=true \
-        --set monitoring.serviceMonitor.scrapeInterval=15s \
-        --set monitoring.serviceMonitor.labels.release=monitoring >/dev/null 2>&1
+        --set monitoring.enabled=true >/dev/null 2>&1
 
     if [[ $? -ne 0 ]]; then
         write_err "Helm upgrade failed"

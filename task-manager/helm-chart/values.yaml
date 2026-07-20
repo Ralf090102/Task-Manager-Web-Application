@@ -2,7 +2,7 @@ replicaCount: 1
 
 image:
   repository: ralf090102/task-manager-app
-  pullPolicy: IfNotPresent
+  pullPolicy: Never
   tag: latest
 
 service:
@@ -39,7 +39,7 @@ scheduler:
   failedJobsHistoryLimit: 1
   image:
     repository: ralf090102/scheduler-service
-    pullPolicy: IfNotPresent
+    pullPolicy: Never
     tag: latest
   resources:
     limits:
@@ -50,10 +50,10 @@ scheduler:
       memory: 128Mi
 
 notification:
-  enabled: false
+  enabled: true
   image:
     repository: ralf090102/notification-service
-    pullPolicy: IfNotPresent
+    pullPolicy: Never
     tag: latest
   smtp:
     host: ""
@@ -70,10 +70,10 @@ notification:
       memory: 128Mi
 
 minio:
-  enabled: false
+  enabled: true
   image:
     repository: minio/minio
-    pullPolicy: IfNotPresent
+    pullPolicy: Never
     tag: latest
   persistence:
     size: 10Gi
@@ -88,10 +88,10 @@ minio:
       memory: 256Mi
 
 fileService:
-  enabled: false
+  enabled: true
   image:
     repository: ralf090102/file-service
-    pullPolicy: IfNotPresent
+    pullPolicy: Never
     tag: latest
   resources:
     limits:
@@ -102,10 +102,10 @@ fileService:
       memory: 128Mi
 
 meilisearch:
-  enabled: false
+  enabled: true
   image:
     repository: getmeili/meilisearch
-    pullPolicy: IfNotPresent
+    pullPolicy: Never
     tag: v1.6
   persistence:
     size: 5Gi
@@ -119,10 +119,10 @@ meilisearch:
       memory: 256Mi
 
 searchSync:
-  enabled: false
+  enabled: true
   image:
     repository: ralf090102/search-sync-service
-    pullPolicy: IfNotPresent
+    pullPolicy: Never
     tag: latest
   resources:
     limits:
@@ -133,11 +133,11 @@ searchSync:
       memory: 128Mi
 
 realtime:
-  enabled: false
+  enabled: true
   replicaCount: 1
   image:
     repository: ralf090102/realtime-service
-    pullPolicy: IfNotPresent
+    pullPolicy: Never
     tag: latest
   corsOrigin: "http://task-manager.local"
   resources:
@@ -149,10 +149,10 @@ realtime:
       memory: 128Mi
 
 analytics:
-  enabled: false
+  enabled: true
   image:
     repository: ralf090102/analytics-service
-    pullPolicy: IfNotPresent
+    pullPolicy: Never
     tag: latest
   cronSchedule: "0 9 * * 1"
   resources:
@@ -164,10 +164,10 @@ analytics:
       memory: 128Mi
 
 webhook:
-  enabled: false
+  enabled: true
   image:
     repository: ralf090102/webhook-service
-    pullPolicy: IfNotPresent
+    pullPolicy: Never
     tag: latest
   retry:
     maxAttempts: 5
@@ -188,10 +188,10 @@ monitoring:
       release: monitoring
 
 teamService:
-  enabled: false
+  enabled: true
   image:
     repository: ralf090102/team-service
-    pullPolicy: IfNotPresent
+    pullPolicy: Never
     tag: latest
   resources:
     limits:
@@ -202,10 +202,10 @@ teamService:
       memory: 128Mi
 
 redis:
-  enabled: false
+  enabled: true
   image:
     repository: redis
-    pullPolicy: IfNotPresent
+    pullPolicy: Never
     tag: 7-alpine
   persistence:
     size: 1Gi
