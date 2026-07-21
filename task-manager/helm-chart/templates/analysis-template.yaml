@@ -1,0 +1,21 @@
+{{- if .Values.canary.enabled }}
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: {{ include "task-manager.fullname" . }}-success-rate
+  labels:
+    {{- include "task-manager.labels" . | nindent 4 }}
+spec:
+  metrics:
+    - name: success-rate
+      interval: {{ .Values.canary.analysis.interval | default "30s" }}
+      successCondition: result[0] >= {{ .Values.canary.analysis.successRate | default 0.95 }}
+      failureLimit: {{ .Values.canary.analysis.failureLimit | default 2 }}
+      provider:
+        prometheus:
+          address: http://monitoring-kube-prometheus-prometheus.monitoring.svc:9090
+          query: |
+            sum(rate(http_request_duration_seconds_count{namespace="task-manager",status_code!~"5.."}[2m]))
+            /
+            sum(rate(http_request_duration_seconds_count{namespace="task-manager"}[2m]))
+{{- end }}

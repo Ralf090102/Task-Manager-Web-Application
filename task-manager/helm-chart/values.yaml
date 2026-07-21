@@ -6,6 +6,13 @@ autoscaling:
   maxReplicas: 3
   targetRequestsPerSecond: 10  # Scale up when avg >10 req/s per pod
 
+canary:
+  enabled: false  # Set to true to replace Deployment with Rollout (progressive delivery)
+  analysis:
+    interval: 30s       # Query Prometheus every 30s
+    successRate: 0.95   # >= 95% non-5xx = healthy
+    failureLimit: 2     # Abort after 2 failed checks
+
 image:
   repository: ralf090102/task-manager-app
   pullPolicy: Never

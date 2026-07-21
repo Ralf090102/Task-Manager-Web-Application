@@ -1,6 +1,6 @@
-{{- if not .Values.canary.enabled }}
-apiVersion: apps/v1
-kind: Deployment
+{{- if .Values.canary.enabled }}
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
 metadata:
   name: {{ include "task-manager.fullname" . }}
   labels:
@@ -95,4 +95,23 @@ spec:
             periodSeconds: 5
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+  strategy:
+    canary:
+      canaryService: {{ include "task-manager.fullname" . }}-canary
+      stableService: {{ include "task-manager.fullname" . }}
+      trafficRouting:
+        nginx:
+          stableIngress: {{ include "task-manager.fullname" . }}
+      steps:
+        - setWeight: 20
+        - pause: { duration: 30s }
+        - analysis:
+            templates:
+              - templateName: {{ include "task-manager.fullname" . }}-success-rate
+        - setWeight: 50
+        - pause: { duration: 30s }
+        - analysis:
+            templates:
+              - templateName: {{ include "task-manager.fullname" . }}-success-rate
+        - setWeight: 100
 {{- end }}
