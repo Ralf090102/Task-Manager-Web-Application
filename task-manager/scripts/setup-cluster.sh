@@ -526,13 +526,32 @@ fi
 #   - Existing release -> upgrades it
 # This makes the script idempotent for --skip-recreate runs.
 #
-# All service configuration (images, resources, enabled flags, SMTP, persistence)
-# comes from helm-chart/values.yaml — Helm reads it automatically from the chart
-# directory. Only 3 values MUST be set via --set:
+# values.yaml defaults are configured for the PRODUCTION ArgoCD/GitOps workflow
+# (canary enabled, autoscaling enabled, secrets disabled, image tag v2-canary).
+# This script deploys via plain Helm on a local Minikube cluster that does NOT
+# have Argo Rollouts, Prometheus Adapter, or pre-created Secrets. We must
+# override several values via --set to match this basic deployment mode:
+#
+# --set "secrets.enabled=true"
+#   Enables the Secret template so Helm creates it from the databaseUrl and
+#   nextauthSecret values below. Without this, pods fail (no Secret found).
 #
 # --set "secrets.databaseUrl=..." / "secrets.nextauthSecret=..."
 #   Injected from the .env file at runtime (secrets must never be committed
 #   to values.yaml).
+#
+# --set "image.tag=${APP_TAG}"
+#   Overrides the production tag (v2-canary) with the tag this script builds
+#   (latest). Without this, pods try to pull v2-canary which doesn't exist.
+#
+# --set "canary.enabled=false"
+#   Disables Argo Rollouts (uses standard Deployment instead). This cluster
+#   doesn't have the Argo Rollouts controller installed, so a Rollout resource
+#   would never be reconciled and no pods would be created.
+#
+# --set "autoscaling.enabled=false"
+#   Disables HPA. This cluster doesn't have Prometheus Adapter installed
+#   (no custom metrics API), so HPA would show <unknown> metrics and never scale.
 #
 # --set "monitoring.enabled=${MONITORING_FLAG}"
 #   Conditional: false on a fresh cluster (ServiceMonitor CRD doesn't exist yet),
@@ -555,8 +574,12 @@ helm upgrade --install "$APP_RELEASE" \
     --create-namespace \
     --no-hooks \
     --set "monitoring.enabled=${MONITORING_FLAG}" \
+    --set "secrets.enabled=true" \
     --set "secrets.databaseUrl=${DATABASE_URL}" \
-    --set "secrets.nextauthSecret=${NEXTAUTH_SECRET}" >/dev/null 2>&1
+    --set "secrets.nextauthSecret=${NEXTAUTH_SECRET}" \
+    --set "image.tag=${APP_TAG}" \
+    --set "canary.enabled=false" \
+    --set "autoscaling.enabled=false" >/dev/null 2>&1
 
 if [[ $? -ne 0 ]]; then
     write_err "Helm deploy failed"
