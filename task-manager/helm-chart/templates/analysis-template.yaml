@@ -12,11 +12,14 @@ spec:
       count: {{ .Values.canary.analysis.count | default 3 }}
       successCondition: result[0] >= {{ .Values.canary.analysis.successRate | default 0.95 }}
       failureLimit: {{ .Values.canary.analysis.failureLimit | default 1 }}
+      consecutiveErrorLimit: 5
       provider:
         prometheus:
           address: http://monitoring-kube-prometheus-prometheus.monitoring.svc:9090
           query: |
-            sum(rate(http_request_duration_seconds_count{namespace="task-manager",status_code!~"5.."}[2m]))
-            /
-            sum(rate(http_request_duration_seconds_count{namespace="task-manager"}[2m]))
+            (
+              sum(rate(http_request_duration_seconds_count{namespace="task-manager",status_code!~"5.."}[2m]))
+              /
+              sum(rate(http_request_duration_seconds_count{namespace="task-manager"}[2m]))
+            ) or vector(1)
 {{- end }}
