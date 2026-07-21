@@ -10,8 +10,9 @@ canary:
   enabled: true  # Set to true to replace Deployment with Rollout (progressive delivery)
   analysis:
     interval: 30s       # Query Prometheus every 30s
+    count: 3            # Run 3 checks per analysis step
     successRate: 0.95   # >= 95% non-5xx = healthy
-    failureLimit: 2     # Abort after 2 failed checks
+    failureLimit: 1     # Abort after 1 failed check
 
 image:
   repository: ralf090102/task-manager-app

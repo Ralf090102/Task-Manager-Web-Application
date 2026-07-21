@@ -9,8 +9,9 @@ spec:
   metrics:
     - name: success-rate
       interval: {{ .Values.canary.analysis.interval | default "30s" }}
+      count: {{ .Values.canary.analysis.count | default 3 }}
       successCondition: result[0] >= {{ .Values.canary.analysis.successRate | default 0.95 }}
-      failureLimit: {{ .Values.canary.analysis.failureLimit | default 2 }}
+      failureLimit: {{ .Values.canary.analysis.failureLimit | default 1 }}
       provider:
         prometheus:
           address: http://monitoring-kube-prometheus-prometheus.monitoring.svc:9090
