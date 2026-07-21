@@ -1,4 +1,4 @@
-{{- if .Values.teamService.enabled }}
+{{- if and .Values.teamService.enabled .Values.secrets.enabled }}
 apiVersion: batch/v1
 kind: Job
 metadata:

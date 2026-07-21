@@ -19,6 +19,7 @@ ingress:
           pathType: Prefix
 
 secrets:
+  enabled: false  # Set to true for manual helm deploys with --set; false for ArgoCD (pre-create Secret)
   databaseUrl: ""
   nextauthSecret: ""
   nextauthUrl: "http://task-manager.local"
