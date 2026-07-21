@@ -335,6 +335,44 @@ Uses Tailwind v4 with new `@import "tailwindcss"` syntax in `globals.css`. Do NO
   kubectl scale deployment task-manager -n task-manager --replicas=1
   ```
 
+## GitOps with ArgoCD — Stage 3 Module F
+
+- **Purpose**: Git-driven deployments — every `git push` to main triggers an automatic Helm chart sync. No more manual `helm upgrade`. Git is the single source of truth.
+- **ArgoCD**: Installed via Helm in `argocd` namespace (server, repo-server, application-controller, redis)
+- **Application CRD**: `task-manager/argocd/application.yaml` — points to GitHub repo main branch, path `task-manager/helm-chart`, automated sync with `prune: true` + `selfHeal: true`
+- **Chart changes for GitOps compatibility**:
+  - `values.yaml`: `secrets.enabled: false` (default off — ArgoCD mode pre-creates Secrets manually; set to `true` for manual `helm upgrade --set` deploys)
+  - `templates/secret.yaml`: Conditional `{{- if .Values.secrets.enabled }}` — main Secret not rendered by ArgoCD
+  - `templates/team-service/db-migration-job.yaml`: Gated on `teamService.enabled AND secrets.enabled` — Helm hooks conflict with ArgoCD sync, so disabled in GitOps mode
+- **Secrets (pre-created in cluster)**: `task-manager-secret` (database-url, nextauth-secret, nextauth-url, auth-trust-host) must exist before applying the Application CRD
+- **Repo visibility**: Repo must be PUBLIC for ArgoCD to access without credentials (or configure a repository credential for private repos)
+- **Self-healing verified**: Manual `kubectl scale deployment task-manager --replicas=3` reverted to 1 within 35 seconds
+- **35+ resources tracked**: All Deployments, StatefulSets, Services, CronJobs, PrometheusRule, ServiceMonitor, Ingress, Secrets, ConfigMaps
+- Accessing ArgoCD UI:
+  ```bash
+  # Port-forward the UI
+  kubectl port-forward -n argocd svc/argocd-server 8080:443
+  # Open https://localhost:8080 (admin / password from:)
+
+  # Get initial admin password
+  kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d
+  ```
+- Deploying via GitOps:
+  ```bash
+  # Make a change to helm-chart/, commit, push
+  git add task-manager/helm-chart/
+  git commit -m "feat: update resource limits"
+  git push origin main
+  # ArgoCD detects change within ~3 minutes (default poll interval), auto-syncs
+
+  # Force immediate refresh
+  kubectl patch application task-manager -n argocd --type merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}}'
+
+  # Check sync status
+  kubectl get application task-manager -n argocd
+  # Expected: Synced / Healthy
+  ```
+
 ## Microservices Expansion — Stage 2
 
 ### Overview
