@@ -373,6 +373,61 @@ Uses Tailwind v4 with new `@import "tailwindcss"` syntax in `globals.css`. Do NO
   # Expected: Synced / Healthy
   ```
 
+## Horizontal Pod Autoscaler — Stage 3 Module E
+
+- **Purpose**: Automatically scale the main app based on HTTP request rate (custom metric), not just CPU
+- **Prometheus Adapter**: Installed in `monitoring` namespace — bridges Prometheus metrics into the Kubernetes Custom Metrics API
+  - Config: `task-manager/scripts/prometheus-adapter-values.yaml`
+  - Custom metrics: `requests_per_second` (from `http_request_duration_seconds_count`, 2m rate), `task_operations` (from `task_operations_total`)
+  - `rules.default: true` provides CPU/memory resource metrics (replaces `metrics-server` which is disabled in Minikube)
+  - Image: `registry.k8s.io/prometheus-adapter/prometheus-adapter:v0.12.0` (may need manual `docker pull` + `minikube image load` due to TLS timeouts)
+- **HPA template**: `templates/hpa.yaml` — conditional on `.Values.autoscaling.enabled`
+  - Metric: `requests_per_second` (type: Pods, target: AverageValue 10)
+  - minReplicas: 1, maxReplicas: 3
+  - Scale-up: 100% per 15s (aggressive), Scale-down: 50% per 30s with 60s stabilization
+- **Deployment change**: `replicas` field conditionally omitted when `autoscaling.enabled: true` (HPA owns it)
+- **ArgoCD `ignoreDifferences`**: `application.yaml` ignores `/spec/replicas` on Deployments — prevents ArgoCD from fighting HPA's dynamic replica changes
+- **values.yaml**: `autoscaling:` section (`enabled: true`, `minReplicas: 1`, `maxReplicas: 3`, `targetRequestsPerSecond: 10`)
+- **Load test**: `task-manager/scripts/load-test.js` (k6 script)
+  - Run from in-cluster pod (DNS from host to ClusterIP services is complex)
+  - MUST use FQDN: `http://task-manager.task-manager.svc.cluster.local:3000/api/tasks` (short name `task-manager` resolves to `default` namespace — silently fails)
+  - Verified: 1 → 2 → 3 pods under ~100 req/s, 3 → 1 after load stops
+- Installing Prometheus Adapter:
+  ```bash
+  helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+  helm repo update
+  helm install prometheus-adapter prometheus-community/prometheus-adapter \
+    --namespace monitoring \
+    --values task-manager/scripts/prometheus-adapter-values.yaml
+
+  # Verify custom metrics API is registered:
+  kubectl get --raw /apis/custom.metrics.k8s.io/v1beta1 | jq '.resources[].name'
+  # Expected: pods/requests_per_second, pods/task_operations, etc.
+
+  # Query the metric for task-manager pods:
+  kubectl get --raw "/apis/custom.metrics.k8s.io/v1beta1/namespaces/task-manager/pods/*/requests_per_second"
+  ```
+- HPA verification:
+  ```bash
+  # Watch HPA decisions in real time:
+  kubectl get hpa -n task-manager -w
+  # TARGETS column: current/target — when current > target, scale up fires
+
+  # Check scaling events:
+  kubectl describe hpa -n task-manager
+  # Events: "New size: 2; reason: pods metric requests_per_second above target"
+  #         "New size: 1; reason: All metrics below target"
+  ```
+- Run load test from inside a cluster pod:
+  ```bash
+  kubectl run loadtest --rm -it --image=node:22-slim -- bash
+  # Inside pod:
+  npx -y autocannon -c 100 -d 120 \
+    http://task-manager.task-manager.svc.cluster.local:3000/api/tasks
+  # In another terminal:
+  kubectl get hpa -n task-manager -w
+  ```
+
 ## Microservices Expansion — Stage 2
 
 ### Overview
