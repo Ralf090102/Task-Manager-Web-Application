@@ -1,0 +1,42 @@
+# Prometheus Adapter values for custom metrics HPA
+# Bridges Prometheus metrics → Kubernetes Custom Metrics API → HPA
+
+prometheus:
+  url: http://monitoring-kube-prometheus-prometheus.monitoring.svc
+  port: 9090
+  path: ""
+
+rules:
+  default: true  # Enable CPU/memory resource metrics from Prometheus
+
+  custom:
+    # Map http_request_duration_seconds_count → requests_per_second custom metric
+    # HPA scales based on this per-pod request rate
+    - seriesQuery: 'http_request_duration_seconds_count{namespace!="",pod!=""}'
+      resources:
+        overrides:
+          namespace: { resource: "namespace" }
+          pod: { resource: "pod" }
+      name:
+        matches: ""
+        as: "requests_per_second"
+      metricsQuery: 'sum(rate(<<.Series>>{<<.LabelMatchers>>}[2m])) by (<<.GroupBy>>)'
+
+    # Map task_operations_total → task_operations custom metric
+    - seriesQuery: 'task_operations_total{namespace!="",pod!=""}'
+      resources:
+        overrides:
+          namespace: { resource: "namespace" }
+          pod: { resource: "pod" }
+      name:
+        matches: ""
+        as: "task_operations"
+      metricsQuery: 'sum(rate(<<.Series>>{<<.LabelMatchers>>}[2m])) by (<<.GroupBy>>)'
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 250m
+    memory: 256Mi

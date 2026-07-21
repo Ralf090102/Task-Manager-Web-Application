@@ -1,5 +1,11 @@
 replicaCount: 1
 
+autoscaling:
+  enabled: true
+  minReplicas: 1
+  maxReplicas: 3
+  targetRequestsPerSecond: 10  # Scale up when avg >10 req/s per pod
+
 image:
   repository: ralf090102/task-manager-app
   pullPolicy: Never
