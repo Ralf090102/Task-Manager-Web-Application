@@ -17,7 +17,7 @@ canary:
 image:
   repository: ralf090102/task-manager-app
   pullPolicy: Never
-  tag: latest
+  tag: v2-canary
 
 service:
   type: ClusterIP
